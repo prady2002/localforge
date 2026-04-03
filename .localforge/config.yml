@@ -1,0 +1,75 @@
+# =============================================================================
+# LocalForge Configuration
+# =============================================================================
+# This file controls how LocalForge behaves in this repository.
+# All fields are optional — defaults are shown below.
+#
+# Values can also be set via environment variables with the LOCALFORGE_ prefix:
+#   LOCALFORGE_MODEL_NAME=codellama:13b
+#   LOCALFORGE_MAX_CONTEXT_TOKENS=8192
+#
+# Priority: env vars > this file > built-in defaults
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Model Settings
+# ---------------------------------------------------------------------------
+
+# Ollama model tag to use for all LLM calls.
+# Run `ollama list` to see available models on your machine.
+model_name: "qwen2.5-coder:7b"
+
+# Base URL of the Ollama HTTP API.
+# Change this if Ollama is running on a different host or port.
+ollama_base_url: "http://localhost:11434"
+
+# Model size profile. Controls context window, retrieval limits, and chunk size.
+# Options: small, medium, large
+#
+#   small  — 4K context, 5 chunks, fast iteration (7B models)
+#   medium — 8K context, 10 chunks, balanced (13-16B models)
+#   large  — 32K context, 20 chunks, best quality (32B+ models)
+model_profile: "small"
+
+# ---------------------------------------------------------------------------
+# Context & Token Budget
+# ---------------------------------------------------------------------------
+
+# Maximum number of tokens to include in the LLM context window.
+# Set this to match your model's actual context size for best results.
+# The context assembler will truncate and prioritize to fit within this budget.
+max_context_tokens: 4096
+
+# ---------------------------------------------------------------------------
+# Agent Behavior
+# ---------------------------------------------------------------------------
+
+# Maximum number of agent loop iterations before forced stop.
+# This prevents runaway loops. Each plan step + retry counts as an iteration.
+max_iterations: 50
+
+# Automatically approve all proposed patches without user confirmation.
+# Use with caution — recommended only for trusted, well-tested tasks.
+auto_approve: false
+
+# When true, show planned patches as diffs but do not write any files.
+# Useful for previewing what the agent would do.
+dry_run: false
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+# Path to the repository root. Usually "." (current directory).
+repo_path: "."
+
+# Path to the SQLite index database (relative to repo root).
+# The index stores file chunks, symbols, and metadata for fast retrieval.
+index_db_path: ".localforge/index.db"
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+# Logging verbosity. Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level: "INFO"

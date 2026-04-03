@@ -1,0 +1,86 @@
+"""Core configuration, models, and Ollama client for localforge."""
+
+from localforge.core.config import (
+    LocalForgeConfig,
+    ModelProfile,
+    ModelProfileSettings,
+    get_model_profile_settings,
+    load_config,
+)
+from localforge.core.models import (
+    AgentHandoff,
+    AgentMessage,
+    AgentPhase,
+    AgentPlan,
+    AgentRole,
+    AgentState,
+    FileChunk,
+    MultiAgentState,
+    OperationType,
+    PatchOperation,
+    PlanStep,
+    RetrievalResult,
+    StepStatus,
+    VerificationResult,
+)
+from localforge.core.ollama_client import OllamaClient, get_model_context_window
+from localforge.core.prompt_templates import (
+    SYSTEM_ANALYZER,
+    SYSTEM_CODER,
+    SYSTEM_ORCHESTRATOR,
+    SYSTEM_PLANNER,
+    SYSTEM_PROMPTS,
+    SYSTEM_REFLECTOR,
+    SYSTEM_SUMMARIZER,
+    SYSTEM_VERIFIER,
+    analyzer_prompt,
+    coder_prompt,
+    orchestrator_prompt,
+    planner_prompt,
+    reflector_prompt,
+    summarizer_prompt,
+    verifier_prompt,
+)
+
+__all__ = [
+    # config
+    "LocalForgeConfig",
+    "ModelProfile",
+    "ModelProfileSettings",
+    "get_model_profile_settings",
+    "load_config",
+    # models
+    "AgentHandoff",
+    "AgentMessage",
+    "AgentPhase",
+    "AgentPlan",
+    "AgentRole",
+    "AgentState",
+    "FileChunk",
+    "MultiAgentState",
+    "OperationType",
+    "PatchOperation",
+    "PlanStep",
+    "RetrievalResult",
+    "StepStatus",
+    "VerificationResult",
+    # ollama
+    "OllamaClient",
+    "get_model_context_window",
+    # prompts
+    "SYSTEM_ANALYZER",
+    "SYSTEM_CODER",
+    "SYSTEM_ORCHESTRATOR",
+    "SYSTEM_PLANNER",
+    "SYSTEM_PROMPTS",
+    "SYSTEM_REFLECTOR",
+    "SYSTEM_SUMMARIZER",
+    "SYSTEM_VERIFIER",
+    "analyzer_prompt",
+    "coder_prompt",
+    "orchestrator_prompt",
+    "planner_prompt",
+    "reflector_prompt",
+    "summarizer_prompt",
+    "verifier_prompt",
+]

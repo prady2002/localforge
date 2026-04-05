@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+from typing import Any
 
 from localforge.core.models import MultiAgentState
 
@@ -28,3 +30,22 @@ class StateManager:
         """Deserialise a :class:`MultiAgentState` from *path*."""
         raw = path.read_text(encoding="utf-8")
         return MultiAgentState.model_validate_json(raw)
+
+    def list_states(self) -> list[dict[str, Any]]:
+        """Return a list of saved state summaries (task, iterations, path)."""
+        if not self.base_dir.is_dir():
+            return []
+        summaries: list[dict[str, Any]] = []
+        for path in sorted(self.base_dir.glob("*.json"), reverse=True):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                summaries.append({
+                    "task": raw.get("task", "unknown"),
+                    "iteration": raw.get("iteration", 0),
+                    "messages": len(raw.get("messages", [])),
+                    "path": str(path),
+                    "filename": path.name,
+                })
+            except (json.JSONDecodeError, OSError):
+                continue
+        return summaries

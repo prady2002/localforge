@@ -47,7 +47,9 @@ class PatcherLike(Protocol):
 
 
 class VerifierRunnerLike(Protocol):
-    def run_verification(self, changed_files: list[str] | None = None) -> list[VerificationResult]: ...
+    def run_verification(
+        self, changed_files: list[str] | None = None,
+    ) -> list[VerificationResult]: ...
     def summarize_results(self, results: list[VerificationResult]) -> dict[str, Any]: ...
 
 
@@ -71,7 +73,7 @@ class AgentOrchestrator:
         5. Summary
     """
 
-    _MAX_STEP_RETRIES = 3
+    _MAX_STEP_RETRIES = 5
 
     def __init__(
         self,
@@ -190,7 +192,8 @@ class AgentOrchestrator:
 
     async def _run_analyzer(
         self, task: str, chunks: list[FileChunk],
-    ) -> dict:
+    ) -> dict[str, Any]:
+        assert self.state is not None
         handoff = AgentHandoff(
             from_role=AgentRole.ORCHESTRATOR,
             to_role=AgentRole.ANALYZER,
@@ -204,8 +207,9 @@ class AgentOrchestrator:
         return msg.structured_data or {}
 
     async def _run_planner(
-        self, task: str, analysis: dict, chunks: list[FileChunk],
-    ) -> dict:
+        self, task: str, analysis: dict[str, Any], chunks: list[FileChunk],
+    ) -> dict[str, Any]:
+        assert self.state is not None
         handoff = AgentHandoff(
             from_role=AgentRole.ORCHESTRATOR,
             to_role=AgentRole.PLANNER,
@@ -218,7 +222,8 @@ class AgentOrchestrator:
         self.state.handoffs.append(handoff)
         return msg.structured_data or {}
 
-    async def _run_summarizer(self, task: str) -> dict:
+    async def _run_summarizer(self, task: str) -> dict[str, Any]:
+        assert self.state is not None
         handoff = AgentHandoff(
             from_role=AgentRole.ORCHESTRATOR,
             to_role=AgentRole.SUMMARIZER,
@@ -246,17 +251,20 @@ class AgentOrchestrator:
         self,
         task: str,
         step: PlanStep,
-        plan_data: dict,
+        plan_data: dict[str, Any],
     ) -> bool:
         """Run one plan step.  Retry with reflection up to ``_MAX_STEP_RETRIES`` times."""
-        attempts: list[dict] = []
+        assert self.state is not None
+        attempts: list[dict[str, Any]] = []
 
         for attempt_num in range(self._MAX_STEP_RETRIES):
             self.display.step(step, attempt_num + 1)
 
             # Gather file context
             file_chunks = self._retrieve_additional(step.files_involved)
-            file_content = self._get_primary_file_content(step.files_involved)
+            file_content = self._get_primary_file_content(
+                step.files_involved, self.config.repo_path,
+            )
             previous_error = attempts[-1]["error"] if attempts else None
 
             # ---- Coder -------------------------------------------
@@ -289,14 +297,16 @@ class AgentOrchestrator:
 
             # ---- Show diff / approval ----------------------------
             self.patcher.show_diff(patch_op)
-            if not self.config.auto_approve:
-                if not self.display.confirm_patch(patch_op):
+            if not self.config.auto_approve and not self.display.confirm_patch(patch_op):
                     return False
 
             # ---- Apply patch -------------------------------------
             applied = self.patcher.apply_patch(patch_op)
             if not applied:
-                attempts.append({"patch": patch_op.model_dump(), "error": "patch application failed"})
+                attempts.append({
+                    "patch": patch_op.model_dump(),
+                    "error": "patch application failed",
+                })
                 continue
             self._patches_applied.append(patch_op)
 
@@ -374,16 +384,17 @@ class AgentOrchestrator:
     # ==================================================================
 
     @staticmethod
-    def _get_primary_file_content(files: list[str]) -> str:
+    def _get_primary_file_content(files: list[str], repo_path: str = ".") -> str:
         if not files:
             return ""
         try:
-            return Path(files[0]).read_text(encoding="utf-8")
+            path = Path(repo_path) / files[0]
+            return path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return ""
 
     @staticmethod
-    def _parse_patch_operation(data: dict) -> PatchOperation:
+    def _parse_patch_operation(data: dict[str, Any]) -> PatchOperation:
         return PatchOperation(
             file_path=data.get("file_path", ""),
             operation_type=data.get("operation", "MODIFY"),
@@ -394,7 +405,7 @@ class AgentOrchestrator:
         )
 
     @staticmethod
-    def _build_plan(plan_data: dict) -> AgentPlan:
+    def _build_plan(plan_data: dict[str, Any]) -> AgentPlan:
         """Build an :class:`AgentPlan` from the planner's JSON output."""
         steps = []
         for s in plan_data.get("steps", []):

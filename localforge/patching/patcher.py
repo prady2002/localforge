@@ -40,7 +40,7 @@ class FilePatcher:
         abs_path = (self.repo_path / file_path).resolve()
 
         # Guard against path traversal – the resolved path must stay inside repo
-        if not str(abs_path).startswith(str(self.repo_path)):
+        if not abs_path.is_relative_to(self.repo_path):
             raise ValueError(
                 f"Path traversal blocked: {file_path!r} resolves outside the repository"
             )
@@ -104,8 +104,30 @@ class FilePatcher:
 
     def apply_patch(self, op: PatchOperation) -> bool:
         """Apply a ``PatchOperation`` to disk.  Returns ``True`` on success."""
+        from localforge.patching.validator import PatchValidator
+
         abs_path = self.repo_path / op.file_path
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+
+        # Safety check
+        validator = PatchValidator()
+        is_safe, warnings = validator.validate_patch_safety(op)
+        if not is_safe:
+            console.print(f"[bold yellow]Safety warnings for {op.file_path}:[/bold yellow]")
+            for w in warnings:
+                console.print(f"  [yellow]⚠ {w}[/yellow]")
+            if not self.config.auto_approve:
+                answer = console.input("[bold]Apply anyway? [y/N] [/bold]").strip().lower()
+                if answer not in ("y", "yes"):
+                    return False
+
+        # Syntax validation for MODIFY and CREATE
+        if op.operation_type in (OperationType.MODIFY, OperationType.CREATE) and op.new_content:
+            is_valid, error = validator.validate_syntax(op.file_path, op.new_content)
+            if not is_valid:
+                console.print(
+                    f"[bold yellow]Syntax warning for {op.file_path}: {error}[/bold yellow]"
+                )
 
         # Backup existing file
         if abs_path.is_file():

@@ -433,7 +433,10 @@ class RepositoryIndexer:
                 INSERT INTO chunks (file_id, start_line, end_line, content, content_hash, tokens)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (file_id, ch["start_line"], ch["end_line"], ch["content"], content_hash, ch["tokens"]),
+                (
+                    file_id, ch["start_line"], ch["end_line"],
+                    ch["content"], content_hash, ch["tokens"],
+                ),
             )
 
         # Extract basic symbols (functions / classes) for supported languages.
@@ -455,66 +458,234 @@ class RepositoryIndexer:
     ) -> None:
         """Extract top-level symbol definitions and store them.
 
-        This intentionally uses simple heuristic line scanning rather than a
-        full parser — accurate enough for search/navigation purposes.
+        Uses heuristic line scanning — accurate enough for search/navigation.
+        Supports Python, JS/TS, Go, Rust, Java, C#, Ruby, PHP, and more.
         """
+        import re
+
         lines = content.splitlines()
+
+        def _insert(name: str, kind: str, lineno: int, scope: str = "module") -> None:
+            if name and not name.startswith("_"):
+                conn.execute(
+                    "INSERT INTO symbols (file_id, name, kind, line, scope) VALUES (?,?,?,?,?)",
+                    (file_id, name.strip(), kind, lineno, scope),
+                )
+
         for lineno, line in enumerate(lines, start=1):
             stripped = line.lstrip()
+            indent = len(line) - len(stripped)
 
+            # ----------------------------------------------------------
             # Python
+            # ----------------------------------------------------------
             if language == "python":
                 if stripped.startswith("def "):
                     name = stripped[4:].split("(", 1)[0].strip()
-                    scope = "module" if not line[0].isspace() else "local"
-                    conn.execute(
-                        "INSERT INTO symbols (file_id, name, kind, line, scope) VALUES (?,?,?,?,?)",
-                        (file_id, name, "function", lineno, scope),
-                    )
+                    scope = "module" if indent == 0 else "local"
+                    _insert(name, "function", lineno, scope)
+                elif stripped.startswith("async def "):
+                    name = stripped[10:].split("(", 1)[0].strip()
+                    scope = "module" if indent == 0 else "local"
+                    _insert(name, "function", lineno, scope)
                 elif stripped.startswith("class "):
                     name = stripped[6:].split("(", 1)[0].split(":", 1)[0].strip()
-                    conn.execute(
-                        "INSERT INTO symbols (file_id, name, kind, line, scope) VALUES (?,?,?,?,?)",
-                        (file_id, name, "class", lineno, "module"),
-                    )
+                    _insert(name, "class", lineno)
+                # Module-level constants: ALL_CAPS = ...
+                elif indent == 0 and re.match(r"^[A-Z][A-Z0-9_]+ *=", stripped):
+                    name = stripped.split("=", 1)[0].strip()
+                    _insert(name, "constant", lineno)
+                continue
 
-            # JS / TS / Go / Rust / Java / C# / etc.
-            elif language in {
-                "javascript", "typescript", "typescriptreact", "javascriptreact",
-                "go", "rust", "java", "csharp", "kotlin", "scala", "swift", "php",
-                "c", "cpp", "ruby", "shell",
-            }:
-                if stripped.startswith("function "):
-                    name = stripped[9:].split("(", 1)[0].strip()
-                    conn.execute(
-                        "INSERT INTO symbols (file_id, name, kind, line, scope) VALUES (?,?,?,?,?)",
-                        (file_id, name, "function", lineno, "module"),
-                    )
+            # ----------------------------------------------------------
+            # JavaScript / TypeScript
+            # ----------------------------------------------------------
+            if language in {"javascript", "typescript", "typescriptreact", "javascriptreact"}:
+                # function declarations
+                if stripped.startswith("function ") or stripped.startswith("function*("):
+                    name = stripped.split("function", 1)[1].lstrip("* ").split("(", 1)[0].strip()
+                    _insert(name, "function", lineno)
+                elif stripped.startswith("async function "):
+                    name = stripped[15:].lstrip("* ").split("(", 1)[0].strip()
+                    _insert(name, "function", lineno)
+                # class
                 elif stripped.startswith("class "):
-                    name = stripped[6:].split("(", 1)[0].split("{", 1)[0].split(":", 1)[0].strip()
-                    conn.execute(
-                        "INSERT INTO symbols (file_id, name, kind, line, scope) VALUES (?,?,?,?,?)",
-                        (file_id, name, "class", lineno, "module"),
+                    name = (
+                        stripped[6:]
+                        .split("{", 1)[0]
+                        .split(" extends")[0]
+                        .split(" implements")[0]
+                        .strip()
                     )
-                elif stripped.startswith("func ") or stripped.startswith("fn "):
-                    prefix_len = 5 if stripped.startswith("func ") else 3
-                    name = stripped[prefix_len:].split("(", 1)[0].strip()
-                    conn.execute(
-                        "INSERT INTO symbols (file_id, name, kind, line, scope) VALUES (?,?,?,?,?)",
-                        (file_id, name, "function", lineno, "module"),
+                    _insert(name, "class", lineno)
+                # Arrow/const exports: export const X = ... / const X = ...
+                elif re.match(r"^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)", stripped):
+                    m = re.match(r"^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)", stripped)
+                    if m:
+                        _insert(m.group(1), "variable", lineno)
+                # export default function / export function
+                elif (
+                    stripped.startswith("export default function")
+                    or stripped.startswith("export function")
+                ):
+                    m = re.search(r"function\s+([A-Za-z_$][\w$]*)", stripped)
+                    if m:
+                        _insert(m.group(1), "function", lineno)
+                # TypeScript: interface / type / enum
+                elif re.match(r"^(?:export\s+)?interface\s+(\w+)", stripped):
+                    m = re.match(r"^(?:export\s+)?interface\s+(\w+)", stripped)
+                    if m:
+                        _insert(m.group(1), "interface", lineno)
+                elif re.match(r"^(?:export\s+)?type\s+(\w+)", stripped):
+                    m = re.match(r"^(?:export\s+)?type\s+(\w+)", stripped)
+                    if m:
+                        _insert(m.group(1), "type", lineno)
+                elif re.match(r"^(?:export\s+)?enum\s+(\w+)", stripped):
+                    m = re.match(r"^(?:export\s+)?enum\s+(\w+)", stripped)
+                    if m:
+                        _insert(m.group(1), "enum", lineno)
+                continue
+
+            # ----------------------------------------------------------
+            # Go
+            # ----------------------------------------------------------
+            if language == "go":
+                if stripped.startswith("func "):
+                    # func (r *Receiver) Name(...) or func Name(...)
+                    m = re.match(r"func\s+(?:\([^)]*\)\s+)?(\w+)", stripped)
+                    if m:
+                        _insert(m.group(1), "function", lineno)
+                elif stripped.startswith("type "):
+                    m = re.match(r"type\s+(\w+)\s+(struct|interface)", stripped)
+                    if m:
+                        _insert(m.group(1), m.group(2), lineno)
+                elif re.match(r"^var\s+(\w+)", stripped):
+                    m = re.match(r"^var\s+(\w+)", stripped)
+                    if m:
+                        _insert(m.group(1), "variable", lineno)
+                elif re.match(r"^const\s+(\w+)", stripped):
+                    m = re.match(r"^const\s+(\w+)", stripped)
+                    if m:
+                        _insert(m.group(1), "constant", lineno)
+                continue
+
+            # ----------------------------------------------------------
+            # Rust
+            # ----------------------------------------------------------
+            if language == "rust":
+                for prefix in ("pub fn ", "pub(crate) fn ", "fn ", "pub async fn ", "async fn "):
+                    if stripped.startswith(prefix):
+                        name = stripped[len(prefix):].split("(", 1)[0].split("<", 1)[0].strip()
+                        _insert(name, "function", lineno)
+                        break
+                else:
+                    if stripped.startswith("struct ") or stripped.startswith("pub struct "):
+                        m = re.match(r"(?:pub\s+)?struct\s+(\w+)", stripped)
+                        if m:
+                            _insert(m.group(1), "struct", lineno)
+                    elif stripped.startswith("enum ") or stripped.startswith("pub enum "):
+                        m = re.match(r"(?:pub\s+)?enum\s+(\w+)", stripped)
+                        if m:
+                            _insert(m.group(1), "enum", lineno)
+                    elif stripped.startswith("trait ") or stripped.startswith("pub trait "):
+                        m = re.match(r"(?:pub\s+)?trait\s+(\w+)", stripped)
+                        if m:
+                            _insert(m.group(1), "trait", lineno)
+                    elif stripped.startswith("impl "):
+                        m = re.match(r"impl(?:<[^>]*>)?\s+(\w+)", stripped)
+                        if m:
+                            _insert(m.group(1), "impl", lineno)
+                continue
+
+            # ----------------------------------------------------------
+            # Java / Kotlin / C#
+            # ----------------------------------------------------------
+            if language in {"java", "kotlin", "csharp", "scala"}:
+                # Class/interface/enum
+                m = re.match(
+                    r"^(?:public|private|protected|abstract|static|final|sealed|open|internal|\s)*"
+                    r"(class|interface|enum|record|object|data class)\s+(\w+)",
+                    stripped,
+                )
+                if m:
+                    _insert(m.group(2), m.group(1).replace("data class", "class"), lineno)
+                    continue
+                # Methods
+                m = re.match(
+                    r"^(?:public|private|protected|abstract|static|final|override|suspend|\s)*"
+                    r"(?:fun\s+|[\w<>\[\]]+\s+)(\w+)\s*\(",
+                    stripped,
+                )
+                if m and m.group(1) not in {"if", "for", "while", "switch", "catch"}:
+                    _insert(m.group(1), "function", lineno)
+                continue
+
+            # ----------------------------------------------------------
+            # Ruby
+            # ----------------------------------------------------------
+            if language == "ruby":
+                if stripped.startswith("def "):
+                    name = stripped[4:].split("(", 1)[0].split(" ", 1)[0].strip()
+                    _insert(name, "function", lineno)
+                elif stripped.startswith("class "):
+                    name = stripped[6:].split("<", 1)[0].split(" ", 1)[0].strip()
+                    _insert(name, "class", lineno)
+                elif stripped.startswith("module "):
+                    name = stripped[7:].strip()
+                    _insert(name, "module", lineno)
+                continue
+
+            # ----------------------------------------------------------
+            # PHP
+            # ----------------------------------------------------------
+            if language == "php":
+                php_func = re.compile(
+                    r"^(?:public|private|protected|static|\s)*function\s+(\w+)"
+                )
+                if php_func.match(stripped):
+                    m = php_func.match(stripped)
+                    if m:
+                        _insert(m.group(1), "function", lineno)
+                elif stripped.startswith("class "):
+                    name = (
+                        stripped[6:]
+                        .split("{", 1)[0]
+                        .split(" extends")[0]
+                        .split(" implements")[0]
+                        .strip()
                     )
-                elif stripped.startswith("pub fn "):
-                    name = stripped[7:].split("(", 1)[0].strip()
-                    conn.execute(
-                        "INSERT INTO symbols (file_id, name, kind, line, scope) VALUES (?,?,?,?,?)",
-                        (file_id, name, "function", lineno, "module"),
-                    )
-                elif stripped.startswith("def "):
-                    name = stripped[4:].split("(", 1)[0].strip()
-                    conn.execute(
-                        "INSERT INTO symbols (file_id, name, kind, line, scope) VALUES (?,?,?,?,?)",
-                        (file_id, name, "function", lineno, "module"),
-                    )
+                    _insert(name, "class", lineno)
+                continue
+
+            # ----------------------------------------------------------
+            # C / C++
+            # ----------------------------------------------------------
+            if language in {"c", "cpp"}:
+                if stripped.startswith("class "):
+                    name = stripped[6:].split("{", 1)[0].split(":", 1)[0].strip()
+                    _insert(name, "class", lineno)
+                elif stripped.startswith("struct "):
+                    name = stripped[7:].split("{", 1)[0].strip()
+                    if name:
+                        _insert(name, "struct", lineno)
+                elif stripped.startswith("namespace "):
+                    name = stripped[10:].split("{", 1)[0].strip()
+                    if name:
+                        _insert(name, "namespace", lineno)
+                continue
+
+            # ----------------------------------------------------------
+            # Generic fallback for unknown languages
+            # ----------------------------------------------------------
+            if stripped.startswith("function "):
+                name = stripped[9:].split("(", 1)[0].strip()
+                _insert(name, "function", lineno)
+            elif stripped.startswith("class "):
+                name = stripped[6:].split("(", 1)[0].split("{", 1)[0].split(":", 1)[0].strip()
+                _insert(name, "class", lineno)
+            elif stripped.startswith("def "):
+                name = stripped[4:].split("(", 1)[0].strip()
+                _insert(name, "function", lineno)
 
     # ------------------------------------------------------------------
     # FTS rebuild helper
@@ -644,7 +815,7 @@ class RepositoryIndexer:
             return False
         try:
             conn = self._get_conn()
-            count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            count: int = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
             return count > 0
         except Exception:
             return False

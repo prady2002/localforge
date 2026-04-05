@@ -16,8 +16,18 @@ _DANGEROUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("File deletion (os.unlink)", re.compile(r"\bos\.unlink\b")),
     ("Code execution via eval()", re.compile(r"\beval\s*\(")),
     ("Code execution via exec()", re.compile(r"\bexec\s*\(")),
-    ("Potential hardcoded password", re.compile(r"""(?i)(?:password|passwd|pwd)\s*=\s*['"][^'"]{4,}['"]""")),
-    ("Potential hardcoded secret/token", re.compile(r"""(?i)(?:secret|token|api_key|apikey)\s*=\s*['"][^'"]{4,}['"]""")),
+    (
+        "Potential hardcoded password",
+        re.compile(
+            r"""(?i)(?:password|passwd|pwd)\s*=\s*['"][^'"]{4,}['"]"""
+        ),
+    ),
+    (
+        "Potential hardcoded secret/token",
+        re.compile(
+            r"""(?i)(?:secret|token|api_key|apikey)\s*=\s*['"][^'"]{4,}['"]"""
+        ),
+    ),
     ("Subprocess shell=True", re.compile(r"\bsubprocess\.\w+\(.*shell\s*=\s*True")),
     ("os.system call", re.compile(r"\bos\.system\s*\(")),
 ]

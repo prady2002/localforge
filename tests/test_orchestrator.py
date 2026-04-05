@@ -4,18 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from localforge.agent.orchestrator import AgentOrchestrator
-from localforge.agent.state_manager import StateManager
 from localforge.context_manager.assembler import ContextAssembler
 from localforge.context_manager.budget import TokenBudgetManager
 from localforge.core.config import LocalForgeConfig
 from localforge.core.models import (
-    AgentHandoff,
-    AgentMessage,
     AgentRole,
     FileChunk,
     MultiAgentState,
@@ -23,7 +20,6 @@ from localforge.core.models import (
     VerificationResult,
 )
 from localforge.core.ollama_client import OllamaClient
-
 
 # ---------------------------------------------------------------------------
 # Reusable structured responses
@@ -234,7 +230,6 @@ async def test_reflection_triggered_on_failure(tmp_path: Path) -> None:
 
     # Make verifier_runner return fail first time, pass second time and onwards
     call_count = {"n": 0}
-    original_run = orch.verifier_runner.run_verification
 
     def dynamic_verify(changed_files=None):
         call_count["n"] += 1

@@ -147,7 +147,9 @@ class IndexSearcher:
 
         scored: list[tuple[float, Any]] = []
         for f in files:
-            ratio = difflib.SequenceMatcher(None, pattern.lower(), f["relative_path"].lower()).ratio()
+            ratio = difflib.SequenceMatcher(
+                None, pattern.lower(), f["relative_path"].lower(),
+            ).ratio()
             scored.append((ratio, f))
 
         scored.sort(key=lambda t: t[0], reverse=True)

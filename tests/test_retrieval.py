@@ -5,13 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from localforge.core.config import LocalForgeConfig
 from localforge.core.models import FileChunk, RetrievalResult
 from localforge.retrieval.ranking import deduplicate_chunks, rank_chunks
 from localforge.retrieval.retriever import ContextRetriever
-
 
 # ---------------------------------------------------------------------------
 # test_decompose_query

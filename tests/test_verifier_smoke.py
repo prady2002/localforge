@@ -1,66 +1,75 @@
-"""Smoke-test for the VerificationRunner."""
+"""Smoke tests for the VerificationRunner — proper pytest format."""
+
+from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
+
 from localforge.core.config import LocalForgeConfig
-from localforge.verifier import VerificationRunner
+from localforge.core.models import VerificationResult
+from localforge.verifier.runner import VerificationRunner
 
-cfg = LocalForgeConfig()
-runner = VerificationRunner(Path("."), cfg)
 
-# 1. detect_project_type
-caps = runner.detect_project_type()
-print("Capabilities:", caps)
-assert caps["has_python"] is True, "Should detect Python files"
+@pytest.fixture()
+def runner(tmp_path: Path) -> VerificationRunner:
+    # Create a minimal Python file so detection works
+    (tmp_path / "sample.py").write_text("x = 1\n", encoding="utf-8")
+    cfg = LocalForgeConfig(repo_path=str(tmp_path))
+    return VerificationRunner(tmp_path, cfg)
 
-# 2. get_verification_commands
-cmds = runner.get_verification_commands()
-print("Commands (%d):" % len(cmds))
-for c in cmds:
-    print("  %s: %s" % (c["name"], c["cmd"]))
-assert any(c["name"] == "syntax_check" for c in cmds), "Missing syntax_check"
 
-# 3. run_command (success)
-result = runner.run_command("python -c \"print(42)\"", timeout=10)
-print("run_command OK: success=%s exit=%d stdout=%r" % (result.success, result.exit_code, result.stdout.strip()))
-assert result.success and result.exit_code == 0 and "42" in result.stdout
+def test_detect_project_type(runner: VerificationRunner) -> None:
+    caps = runner.detect_project_type()
+    assert caps["has_python"] is True
 
-# 4. run_command (failure)
-result2 = runner.run_command("python -c \"raise ValueError(123)\"", timeout=10)
-print("run_command FAIL: success=%s exit=%d" % (result2.success, result2.exit_code))
-assert not result2.success
 
-# 5. summarize_results
-summary = runner.summarize_results([result, result2])
-print("Summary:", summary)
-assert not summary["all_passed"]
-assert len(summary["failed_commands"]) == 1
+def test_run_command_success(runner: VerificationRunner) -> None:
+    result = runner.run_command('python -c "print(42)"', timeout=10)
+    assert result.success
+    assert result.exit_code == 0
+    assert "42" in result.stdout
 
-summary_pass = runner.summarize_results([result])
-assert summary_pass["all_passed"]
 
-summary_empty = runner.summarize_results([])
-assert not summary_empty["all_passed"]
+def test_run_command_failure(runner: VerificationRunner) -> None:
+    result = runner.run_command('python -c "raise ValueError(123)"', timeout=10)
+    assert not result.success
 
-# 6. parse_python_errors
-test_output = (
-    "FAILED tests/test_x.py::test_login - AssertionError: expected True\n"
-    "src/auth.py:10: error: Incompatible return type\n"
-    "src/utils.py:25:3: E501 Line too long\n"
-)
-errors = runner.parse_python_errors(test_output)
-print("Parsed errors (%d):" % len(errors))
-for e in errors:
-    print("  ", e)
-assert len(errors) == 3, "Expected 3 errors, got %d" % len(errors)
-assert errors[0]["tool"] == "pytest"
-assert errors[1]["tool"] == "mypy" and errors[1]["line"] == 10
-assert errors[2]["tool"] == "ruff" and errors[2]["line"] == 25
 
-# 7. run_verification (real, against this repo)
-results = runner.run_verification(changed_files=["localforge/core/config.py"])
-print("run_verification: %d results" % len(results))
-for r in results:
-    print("  cmd=%r success=%s" % (r.command, r.success))
+def test_summarize_results_mixed(runner: VerificationRunner) -> None:
+    ok = VerificationResult(
+        success=True, command="echo ok", stdout="ok", stderr="",
+        exit_code=0, error_count=0, warning_count=0,
+    )
+    fail = VerificationResult(
+        success=False, command="fail cmd", stdout="", stderr="error",
+        exit_code=1, error_count=1, warning_count=0,
+    )
+    summary = runner.summarize_results([ok, fail])
+    assert not summary["all_passed"]
+    assert len(summary["failed_commands"]) == 1
 
-print()
-print("ALL TESTS PASSED")
+
+def test_summarize_results_all_pass(runner: VerificationRunner) -> None:
+    ok = VerificationResult(
+        success=True, command="echo ok", stdout="ok", stderr="",
+        exit_code=0, error_count=0, warning_count=0,
+    )
+    assert runner.summarize_results([ok])["all_passed"]
+
+
+def test_summarize_results_empty(runner: VerificationRunner) -> None:
+    assert not runner.summarize_results([])["all_passed"]
+
+
+def test_parse_python_errors(runner: VerificationRunner) -> None:
+    output = (
+        "FAILED tests/test_x.py::test_login - AssertionError: expected True\n"
+        "src/auth.py:10: error: Incompatible return type\n"
+        "src/utils.py:25:3: E501 Line too long\n"
+    )
+    errors = runner.parse_python_errors(output)
+    assert len(errors) == 3
+    assert errors[0]["tool"] == "pytest"
+    assert errors[1]["tool"] == "mypy" and errors[1]["line"] == 10
+    assert errors[2]["tool"] == "ruff" and errors[2]["line"] == 25

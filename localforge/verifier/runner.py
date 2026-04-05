@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
@@ -27,7 +28,7 @@ class VerificationRunner:
     # Project detection
     # ------------------------------------------------------------------
 
-    def detect_project_type(self) -> dict:
+    def detect_project_type(self) -> dict[str, bool]:
         """Return a dict of detected project capabilities."""
         caps: dict[str, bool] = {}
 
@@ -92,10 +93,10 @@ class VerificationRunner:
         except (ImportError, ValueError):
             return shutil.which("pytest") is not None
 
-    def get_verification_commands(self) -> list[dict]:
+    def get_verification_commands(self) -> list[dict[str, Any]]:
         """Return an ordered list of verification commands for this project."""
         caps = self.detect_project_type()
-        commands: list[dict] = []
+        commands: list[dict[str, Any]] = []
 
         if caps.get("has_python"):
             # syntax check – always available with Python
@@ -250,7 +251,7 @@ class VerificationRunner:
     # Summarise results
     # ------------------------------------------------------------------
 
-    def summarize_results(self, results: list[VerificationResult]) -> dict:
+    def summarize_results(self, results: list[VerificationResult]) -> dict[str, Any]:
         """Produce a compact summary dict from a list of verification results."""
         failed = [r.command for r in results if not r.success]
         total_errors = sum(r.error_count for r in results)
@@ -276,7 +277,7 @@ class VerificationRunner:
     # Error parsing
     # ------------------------------------------------------------------
 
-    def parse_python_errors(self, output: str) -> list[dict]:
+    def parse_python_errors(self, output: str) -> list[dict[str, Any]]:
         """Parse common Python error formats from combined output.
 
         Recognised formats:
@@ -284,7 +285,7 @@ class VerificationRunner:
         - mypy:    ``file.py:10: error: ...``
         - ruff:    ``file.py:10:5: E501 ...``
         """
-        errors: list[dict] = []
+        errors: list[dict[str, Any]] = []
 
         # pytest failures
         for m in re.finditer(

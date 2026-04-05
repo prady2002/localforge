@@ -5,12 +5,32 @@ from __future__ import annotations
 import abc
 import json
 import logging
+from pathlib import Path
+from typing import Any
 
 from localforge.context_manager.assembler import ContextAssembler
 from localforge.context_manager.budget import TokenBudgetManager
 from localforge.core.config import LocalForgeConfig
 from localforge.core.models import AgentHandoff, AgentMessage, AgentRole, FileChunk
 from localforge.core.ollama_client import OllamaClient
+
+
+def _load_project_rules(repo_path: str) -> str:
+    """Load project-specific rules from ``.localforge/rules.md`` if present."""
+    rules_path = Path(repo_path) / ".localforge" / "rules.md"
+    if rules_path.is_file():
+        try:
+            content = rules_path.read_text(encoding="utf-8").strip()
+            # Skip the file if it's just the default template comments
+            lines = [
+                ln for ln in content.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")
+            ]
+            if lines:
+                return f"\n\nPROJECT RULES (follow these strictly):\n{content}\n"
+        except OSError:
+            pass
+    return ""
 
 
 class BaseAgent(abc.ABC):
@@ -50,7 +70,7 @@ class BaseAgent(abc.ABC):
     # LLM interaction
     # ------------------------------------------------------------------
 
-    async def _call_llm(self, user_prompt: str, schema: str) -> dict:
+    async def _call_llm(self, user_prompt: str, schema: str) -> dict[str, Any]:
         """Send a structured request to the LLM and return parsed JSON.
 
         Steps
@@ -63,29 +83,35 @@ class BaseAgent(abc.ABC):
         6. Return the parsed dict.
         """
         budget = self.config.max_context_tokens
+
+        # Inject project-specific rules into the system prompt
+        rules = _load_project_rules(self.config.repo_path)
+        effective_system = self.system_prompt + rules
+
         prompt_tokens = self.budget_manager.count_tokens(
-            self.system_prompt + user_prompt
+            effective_system + user_prompt
         )
 
         if prompt_tokens > budget:
-            allowed = max(budget - self.budget_manager.count_tokens(self.system_prompt) - 1024, 0)
+            # Reserve space for system prompt, schema overhead, and model output
+            allowed = max(budget - self.budget_manager.count_tokens(effective_system) - 2048, 0)
             user_prompt = self.budget_manager._truncate_to_tokens(user_prompt, allowed)
 
         messages = [{"role": "user", "content": user_prompt}]
 
         raw = await self.ollama.chat_structured(
             messages,
-            system=self.system_prompt,
+            system=effective_system,
             response_schema=schema,
             agent_role=self.role.value,
         )
 
         self._last_tokens_used = self.budget_manager.count_tokens(
-            self.system_prompt + user_prompt + raw
+            effective_system + user_prompt + raw
         )
 
         try:
-            parsed = json.loads(raw)
+            parsed: dict[str, Any] = json.loads(raw)
             return parsed
         except json.JSONDecodeError as exc:
             self.logger.warning("Failed to parse LLM response as JSON: %s", exc)
@@ -120,7 +146,7 @@ class BaseAgent(abc.ABC):
     def _record_message(
         self,
         content: str,
-        structured_data: dict,
+        structured_data: dict[str, Any],
         success: bool,
         tokens: int,
     ) -> AgentMessage:

@@ -7,6 +7,7 @@ Each agent role has a system prompt (constant) and a task-prompt builder
 from __future__ import annotations
 
 import json
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # System prompts – one per agent role
@@ -21,6 +22,11 @@ You ONLY analyze and output JSON.
 Be extremely precise. Only refer to code that is actually present in the provided context.
 Never guess or hallucinate file contents or function names.
 If you are uncertain about something, say so explicitly in your output.
+When analyzing, pay close attention to:
+- The full repository structure provided
+- Import chains and module dependencies
+- Function signatures, class hierarchies, and data flow
+- Configuration files and entry points
 
 Output ONLY valid JSON. No markdown. No explanation outside the JSON."""
 
@@ -45,22 +51,27 @@ You do NOT plan. You do NOT analyze. You ONLY write code.
 Rules:
 - Output ONLY the patch JSON, nothing else
 - The search_block MUST be exact text copied from the provided file content
+- Include enough context in search_block to make the match unique (3+ lines)
 - Make the MINIMAL change required — do not refactor unrelated code
 - Never invent functions or imports that don't exist in the codebase
+- Ensure your replacement code is syntactically valid
+- Preserve existing indentation style
 - If you are unsure about existing code, output {"error": "need_more_context", "reason": "..."}
 
 Output ONLY valid JSON. No markdown. No explanation outside the JSON."""
 
 SYSTEM_VERIFIER = """\
 You are the Verifier Agent in a coding assistant system called LocalForge.
-Your ONLY job: interpret verification command output (test results, lint, type check) and decide next action.
+Your ONLY job: interpret verification command output (test results,
+lint, type check) and decide next action.
 You do NOT write code. You do NOT plan. You ONLY interpret results and decide.
 
 Output ONLY valid JSON. No markdown. No explanation outside the JSON."""
 
 SYSTEM_REFLECTOR = """\
 You are the Reflector Agent in a coding assistant system called LocalForge.
-Your ONLY job: when a patch fails verification, analyze WHY it failed and produce a corrected approach.
+Your ONLY job: when a patch fails verification, analyze WHY it failed
+and produce a corrected approach.
 You do NOT write the fix yourself. You write INSTRUCTIONS for the Coder Agent.
 
 Be precise. Identify the exact error. Provide specific corrective instructions.
@@ -70,7 +81,8 @@ Output ONLY valid JSON. No markdown. No explanation outside the JSON."""
 
 SYSTEM_SUMMARIZER = """\
 You are the Summarizer Agent in a coding assistant system called LocalForge.
-Your ONLY job: given the full history of agent actions and patches, write a clear human-readable summary.
+Your ONLY job: given the full history of agent actions and patches,
+write a clear human-readable summary.
 Output ONLY valid JSON. No markdown. No explanation outside the JSON."""
 
 SYSTEM_ORCHESTRATOR = """\
@@ -212,7 +224,8 @@ def analyzer_prompt(task: str, context: str, repo_structure: str) -> str:
         "Respond with a JSON object containing these exact keys:\n"
         "- understanding: what the task requires in detail\n"
         "- affected_files: list of file paths from the context that are relevant\n"
-        "- root_cause: if this is a bug fix, what is the likely root cause (empty string otherwise)\n"
+        "- root_cause: if this is a bug fix, what is the likely "
+        "root cause (empty string otherwise)\n"
         "- complexity: one of simple, moderate, complex\n"
         "- approach: specific strategy to implement the task\n"
         "- risks: list of things that could go wrong\n"
@@ -222,7 +235,7 @@ def analyzer_prompt(task: str, context: str, repo_structure: str) -> str:
     )
 
 
-def planner_prompt(task: str, analysis: dict, context: str) -> str:
+def planner_prompt(task: str, analysis: dict[str, Any], context: str) -> str:
     """Build the user-turn message for the Planner agent."""
     analysis_json = json.dumps(analysis, indent=2)
     return (
@@ -246,7 +259,7 @@ def planner_prompt(task: str, analysis: dict, context: str) -> str:
 
 def coder_prompt(
     task: str,
-    step: dict,
+    step: dict[str, Any],
     file_content: str,
     file_path: str,
     context: str,
@@ -286,9 +299,9 @@ def coder_prompt(
 
 def verifier_prompt(
     task: str,
-    step: dict,
+    step: dict[str, Any],
     verification_output: str,
-    errors_parsed: list,
+    errors_parsed: list[Any],
 ) -> str:
     """Build the user-turn message for the Verifier agent."""
     step_json = json.dumps(step, indent=2)
@@ -313,8 +326,8 @@ def verifier_prompt(
 
 def reflector_prompt(
     task: str,
-    step: dict,
-    attempts: list[dict],
+    step: dict[str, Any],
+    attempts: list[dict[str, Any]],
     errors: list[str],
 ) -> str:
     """Build the user-turn message for the Reflector agent."""
@@ -341,8 +354,8 @@ def reflector_prompt(
 
 def summarizer_prompt(
     task: str,
-    patches: list,
-    verification_results: list,
+    patches: list[Any],
+    verification_results: list[Any],
     iterations: int,
 ) -> str:
     """Build the user-turn message for the Summarizer agent."""
@@ -377,8 +390,8 @@ def summarizer_prompt(
 
 def orchestrator_prompt(
     task: str,
-    current_state: dict,
-    available_agents: list,
+    current_state: dict[str, Any],
+    available_agents: list[str],
 ) -> str:
     """Build the user-turn message for the Orchestrator agent."""
     state_json = json.dumps(current_state, indent=2, default=str)

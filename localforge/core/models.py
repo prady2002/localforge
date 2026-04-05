@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -34,7 +35,7 @@ class RetrievalResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class OperationType(str, enum.Enum):
+class OperationType(enum.StrEnum):
     """The kind of file operation a plan step or patch describes."""
 
     CREATE = "CREATE"
@@ -42,7 +43,7 @@ class OperationType(str, enum.Enum):
     DELETE = "DELETE"
 
 
-class StepStatus(str, enum.Enum):
+class StepStatus(enum.StrEnum):
     """Execution status of a single plan step."""
 
     PENDING = "PENDING"
@@ -118,7 +119,7 @@ class VerificationResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class AgentPhase(str, enum.Enum):
+class AgentPhase(enum.StrEnum):
     """High-level phase the agent loop is currently in."""
 
     UNDERSTANDING = "UNDERSTANDING"
@@ -161,7 +162,7 @@ class AgentState(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class AgentRole(str, enum.Enum):
+class AgentRole(enum.StrEnum):
     ORCHESTRATOR = "ORCHESTRATOR"
     ANALYZER = "ANALYZER"
     PLANNER = "PLANNER"
@@ -174,7 +175,7 @@ class AgentRole(str, enum.Enum):
 class AgentMessage(BaseModel):
     role: AgentRole
     content: str
-    structured_data: dict | None = None
+    structured_data: dict[str, Any] | None = None
     tokens_used: int = 0
     iteration: int = 0
     success: bool = True
@@ -184,7 +185,7 @@ class AgentMessage(BaseModel):
 class AgentHandoff(BaseModel):
     from_role: AgentRole
     to_role: AgentRole
-    payload: dict
+    payload: dict[str, Any]
     context_chunks: list[FileChunk] = []
     instruction: str
 
@@ -195,7 +196,7 @@ class MultiAgentState(BaseModel):
     current_agent: AgentRole = AgentRole.ORCHESTRATOR
     messages: list[AgentMessage] = []
     handoffs: list[AgentHandoff] = []
-    agent_states: dict[str, dict] = {}
+    agent_states: dict[str, dict[str, Any]] = {}
     plan: AgentPlan | None = None
     patches_applied: list[PatchOperation] = []
     verification_results: list[VerificationResult] = []

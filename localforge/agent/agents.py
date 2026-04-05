@@ -34,7 +34,7 @@ from localforge.core.prompt_templates import (
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", ".tox", ".mypy_cache", ".localforge"}
 
-_MAX_TREE_LINES = 50
+_MAX_TREE_LINES = 200
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +64,10 @@ class AnalyzerAgent(BaseAgent):
             handoff.payload["task"], context_str, repo_structure,
         )
         result = await self._call_llm(prompt, ANALYZER_SCHEMA)
-        return self._record_message(str(result), result, success=bool(result), tokens=self._last_tokens_used)
+        return self._record_message(
+            str(result), result, success=bool(result),
+            tokens=self._last_tokens_used,
+        )
 
     # -- helpers --------------------------------------------------------------
 
@@ -124,7 +127,10 @@ class PlannerAgent(BaseAgent):
             )
             result = await self._call_llm(consolidation_prompt, PLANNER_SCHEMA)
 
-        return self._record_message(str(result), result, success=bool(result), tokens=self._last_tokens_used)
+        return self._record_message(
+            str(result), result, success=bool(result),
+            tokens=self._last_tokens_used,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +165,15 @@ class CoderAgent(BaseAgent):
         result = await self._call_llm(prompt, CODER_SCHEMA)
 
         if result.get("error") == "need_more_context":
-            return self._record_message(str(result), result, success=False, tokens=self._last_tokens_used)
+            return self._record_message(
+                str(result), result, success=False,
+                tokens=self._last_tokens_used,
+            )
 
-        return self._record_message(str(result), result, success=bool(result), tokens=self._last_tokens_used)
+        return self._record_message(
+            str(result), result, success=bool(result),
+            tokens=self._last_tokens_used,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +235,10 @@ class ReflectorAgent(BaseAgent):
         prompt = reflector_prompt(task, step, attempts, errors)
         result = await self._call_llm(prompt, REFLECTOR_SCHEMA)
 
-        return self._record_message(str(result), result, success=bool(result), tokens=self._last_tokens_used)
+        return self._record_message(
+            str(result), result, success=bool(result),
+            tokens=self._last_tokens_used,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -253,4 +268,7 @@ class SummarizerAgent(BaseAgent):
         prompt = summarizer_prompt(task, patches, verification_results, iterations)
         result = await self._call_llm(prompt, SUMMARIZER_SCHEMA)
 
-        return self._record_message(str(result), result, success=bool(result), tokens=self._last_tokens_used)
+        return self._record_message(
+            str(result), result, success=bool(result),
+            tokens=self._last_tokens_used,
+        )

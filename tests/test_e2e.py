@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -20,7 +20,6 @@ from localforge.core.models import (
     VerificationResult,
 )
 from localforge.core.ollama_client import OllamaClient
-
 
 # ---------------------------------------------------------------------------
 # Responses

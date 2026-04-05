@@ -92,7 +92,7 @@ class ContextRetriever:
         queries.extend(file_pattern)
 
         # 5. Significant keywords — nouns / technical terms > 3 chars
-        _STOP = {
+        stop = {
             "the", "and", "for", "that", "this", "with", "from", "have",
             "has", "not", "are", "was", "were", "been", "being", "will",
             "should", "could", "would", "can", "does", "did", "but",
@@ -102,7 +102,7 @@ class ContextRetriever:
             "such", "only",
         }
         words = re.findall(r"\b[a-zA-Z]{4,}\b", task)
-        keywords = [w.lower() for w in words if w.lower() not in _STOP]
+        keywords = [w.lower() for w in words if w.lower() not in stop]
         queries.extend(keywords)
 
         # Deduplicate while preserving order

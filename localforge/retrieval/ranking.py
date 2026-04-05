@@ -128,7 +128,7 @@ def _extract_keywords(text: str) -> list[str]:
 
     Splits on whitespace and punctuation, removes short / stop words.
     """
-    _STOP_WORDS = {
+    stop_words = {
         "the", "a", "an", "is", "are", "was", "were", "be", "been",
         "in", "on", "at", "to", "for", "of", "and", "or", "not",
         "it", "this", "that", "with", "from", "by", "as", "if",
@@ -138,7 +138,7 @@ def _extract_keywords(text: str) -> list[str]:
         "make", "update", "use",
     }
     tokens = re.split(r"[^a-zA-Z0-9_]+", text.lower())
-    return [t for t in tokens if t and len(t) > 1 and t not in _STOP_WORDS]
+    return [t for t in tokens if t and len(t) > 1 and t not in stop_words]
 
 
 def _recency_boost(file_path: Path) -> float:

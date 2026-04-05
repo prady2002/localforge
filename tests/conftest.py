@@ -5,12 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
 from localforge.core.config import LocalForgeConfig
-
 
 # ---------------------------------------------------------------------------
 # tmp_repo — a temporary directory with a fake Python web-app structure
@@ -270,7 +268,10 @@ def mock_ollama_response() -> dict[str, Any]:
             "file_path": "app/routes.py",
             "operation": "MODIFY",
             "search_block": 'if username == "admin" and password == "secret":',
-            "replace_block": 'if username and password and username == "admin" and password == "secret":',
+            "replace_block": (
+                'if username and password and username == "admin"'
+                ' and password == "secret":'
+            ),
             "description": "Add null checks before comparing credentials.",
         }),
         "verifier": json.dumps({

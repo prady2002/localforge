@@ -12,7 +12,6 @@ from localforge.core.models import OperationType, PatchOperation
 from localforge.patching.patcher import FilePatcher
 from localforge.patching.validator import PatchValidator
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

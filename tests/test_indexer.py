@@ -10,7 +10,6 @@ import pytest
 from localforge.core.config import LocalForgeConfig
 from localforge.index.indexer import RepositoryIndexer
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

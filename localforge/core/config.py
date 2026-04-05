@@ -12,7 +12,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
-class ModelProfile(str, enum.Enum):
+class ModelProfile(enum.StrEnum):
     """Model size profile controlling context and retrieval parameters."""
 
     SMALL = "small"
@@ -38,9 +38,9 @@ _PROFILE_MAP: dict[ModelProfile, ModelProfileSettings] = {
         chunk_size=512,
     ),
     ModelProfile.MEDIUM: ModelProfileSettings(
-        context_window=8192,
+        context_window=16384,
         reasoning_depth=4,
-        retrieval_limit=10,
+        retrieval_limit=15,
         chunk_size=1024,
     ),
     ModelProfile.LARGE: ModelProfileSettings(
@@ -75,7 +75,7 @@ class LocalForgeConfig(BaseSettings):
         description="Base URL of the Ollama HTTP API.",
     )
     max_context_tokens: int = Field(
-        default=4096,
+        default=16384,
         description="Maximum number of tokens to include in the LLM context window.",
     )
     max_iterations: int = Field(
@@ -103,7 +103,7 @@ class LocalForgeConfig(BaseSettings):
         description="Logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
     )
     model_profile: ModelProfile = Field(
-        default=ModelProfile.SMALL,
+        default=ModelProfile.MEDIUM,
         description="Model size profile (small, medium, large).",
     )
 

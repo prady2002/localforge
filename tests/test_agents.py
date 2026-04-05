@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,15 +12,12 @@ from localforge.agent.agents import (
     CoderAgent,
     PlannerAgent,
     ReflectorAgent,
-    SummarizerAgent,
     VerifierAgent,
 )
 from localforge.context_manager.assembler import ContextAssembler
 from localforge.context_manager.budget import TokenBudgetManager
-from localforge.core.config import LocalForgeConfig
 from localforge.core.models import AgentHandoff, AgentRole, FileChunk
 from localforge.core.ollama_client import OllamaClient
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -93,7 +90,10 @@ async def test_planner_agent_consolidates_large_plans(_agent_deps) -> None:
         "reasoning": "Many changes needed.",
         "estimated_complexity": "high",
         "steps": [
-            {"step_id": i, "description": f"Step {i}", "files_involved": ["f.py"], "operation": "MODIFY"}
+            {
+                "step_id": i, "description": f"Step {i}",
+                "files_involved": ["f.py"], "operation": "MODIFY",
+            }
             for i in range(1, 26)  # 25 steps — triggers consolidation
         ],
     }
@@ -101,7 +101,12 @@ async def test_planner_agent_consolidates_large_plans(_agent_deps) -> None:
         "reasoning": "Consolidated.",
         "estimated_complexity": "medium",
         "steps": [
-            {"step_id": i, "description": f"Consolidated step {i}", "files_involved": ["f.py"], "operation": "MODIFY"}
+            {
+                "step_id": i,
+                "description": f"Consolidated step {i}",
+                "files_involved": ["f.py"],
+                "operation": "MODIFY",
+            }
             for i in range(1, 13)  # 12 steps
         ],
     }

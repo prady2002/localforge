@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
 from localforge.core.config import LocalForgeConfig
 from localforge.core.models import FileChunk
+
+
+class _TokenEncoder(Protocol):
+    def encode(self, text: str) -> list[int]: ...
+    def decode(self, tokens: list[int]) -> str: ...
 
 
 class _FallbackEncoder:
@@ -18,6 +25,10 @@ class _FallbackEncoder:
         """
         return [0] * (len(text) // 4)
 
+    @staticmethod
+    def decode(tokens: list[int]) -> str:
+        return "" * len(tokens)
+
 
 class TokenBudgetManager:
     """Manages token counting and budget allocation for LLM context windows.
@@ -27,7 +38,7 @@ class TokenBudgetManager:
     fixed token budget.
     """
 
-    _encoder = None  # lazily initialised, shared across instances
+    _encoder: _TokenEncoder | None = None  # lazily initialised, shared across instances
 
     def __init__(self, config: LocalForgeConfig) -> None:
         """Initialise the budget manager.
@@ -44,7 +55,7 @@ class TokenBudgetManager:
     # ------------------------------------------------------------------
 
     @classmethod
-    def _get_encoder(cls):
+    def _get_encoder(cls) -> _TokenEncoder:
         """Return the cached tiktoken encoder, creating it on first call.
 
         Falls back to a simple word-based estimator if tiktoken cannot
@@ -183,4 +194,4 @@ class TokenBudgetManager:
 
         enc = self._get_encoder()
         token_ids = enc.encode(text)[:target]
-        return enc.decode(token_ids) + suffix
+        return str(enc.decode(token_ids)) + suffix

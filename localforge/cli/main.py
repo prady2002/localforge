@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from localforge.core.config import LocalForgeConfig
+    from localforge.core.models import MultiAgentState
+    from localforge.index import IndexSearcher, RepositoryIndexer
 
 # Ensure UTF-8 output on Windows to prevent UnicodeEncodeError from Rich
 # rendering Unicode spinners and box-drawing characters.
@@ -14,10 +22,8 @@ if sys.platform == "win32":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     for _stream in (sys.stdout, sys.stderr):
         if hasattr(_stream, "reconfigure"):
-            try:
+            with contextlib.suppress(Exception):
                 _stream.reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
 
 import typer
 from rich.console import Console
@@ -51,7 +57,7 @@ def _resolve_repo(repo_path: Path) -> Path:
     return Path(repo_path).resolve()
 
 
-def _load_config(repo_path: Path, **overrides: object):  # noqa: ANN202
+def _load_config(repo_path: Path, **overrides: object) -> LocalForgeConfig:  # noqa: ANN202
     from localforge.core.config import LocalForgeConfig, load_config
 
     cfg = load_config(str(repo_path))
@@ -62,7 +68,7 @@ def _load_config(repo_path: Path, **overrides: object):  # noqa: ANN202
     return cfg
 
 
-def _check_ollama(config) -> bool:  # noqa: ANN001
+def _check_ollama(config: LocalForgeConfig) -> bool:  # noqa: ANN001
     """Return True if Ollama is reachable, else print error and return False."""
     from localforge.core.ollama_client import OllamaClient
 
@@ -82,7 +88,9 @@ def _check_ollama(config) -> bool:  # noqa: ANN001
     return healthy
 
 
-def _build_indexer_and_searcher(repo_path: Path, config):  # noqa: ANN001
+def _build_indexer_and_searcher(
+    repo_path: Path, config: LocalForgeConfig,
+) -> tuple[RepositoryIndexer, IndexSearcher]:  # noqa: ANN001
     from localforge.index import IndexSearcher, RepositoryIndexer
 
     db_path = repo_path / config.index_db_path
@@ -91,7 +99,7 @@ def _build_indexer_and_searcher(repo_path: Path, config):  # noqa: ANN001
     return indexer, searcher
 
 
-def _ensure_index(repo_path: Path, config) -> None:  # noqa: ANN001
+def _ensure_index(repo_path: Path, config: LocalForgeConfig) -> None:  # noqa: ANN001
     """Index the repo if no index exists yet."""
     from localforge.index import RepositoryIndexer
 
@@ -123,8 +131,22 @@ def main(
         callback=_version_callback,
         is_eager=True,
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "--debug",
+        help="Enable verbose/debug logging output.",
+        is_eager=True,
+    ),
 ) -> None:
     """localforge — local-first, repo-aware coding agent."""
+    if verbose:
+        import logging
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +246,6 @@ def index(
     repo = _resolve_repo(repo_path)
     config = _load_config(repo)
 
-    if not _check_ollama(config):
-        raise typer.Exit(1)
-
     db_path = repo / config.index_db_path
     indexer = RepositoryIndexer(repo, db_path, config)
 
@@ -254,17 +273,30 @@ def index(
 
 @app.command("analyze")
 def analyze(
-    task: str = typer.Argument(..., help="Describe what you want to understand about the code."),
+    task: str = typer.Argument(
+        None, help="Describe what you want to understand about the code.",
+    ),
     repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
     limit: int = typer.Option(10, "--limit", "-n", help="Max chunks to retrieve."),
+    model: str | None = typer.Option(None, "--model", "-m", help="Override the Ollama model."),
 ) -> None:
     """Retrieve and display the code chunks most relevant to a task."""
+    if not task:
+        console.print(
+            "[yellow]No task provided.[/yellow]\n"
+            "Usage: [bold]localforge analyze \"describe what to analyze\"[/bold]\n"
+            "Or use [bold cyan]localforge chat[/bold cyan] for interactive mode."
+        )
+        raise typer.Exit(1)
     from localforge.cli.display import print_chunks
     from localforge.context_manager.budget import TokenBudgetManager
     from localforge.retrieval import ContextRetriever
 
     repo = _resolve_repo(repo_path)
-    config = _load_config(repo)
+    overrides: dict[str, object] = {}
+    if model is not None:
+        overrides["model_name"] = model
+    config = _load_config(repo, **overrides)
 
     _ensure_index(repo, config)
 
@@ -295,10 +327,20 @@ def analyze(
 
 @app.command("plan")
 def plan(
-    task: str = typer.Argument(..., help="Describe the coding task to plan."),
+    task: str = typer.Argument(
+        None, help="Describe the coding task to plan.",
+    ),
     repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
+    model: str | None = typer.Option(None, "--model", "-m", help="Override the Ollama model."),
 ) -> None:
     """Analyze a task and produce an execution plan (saved to .localforge/last_plan.json)."""
+    if not task:
+        console.print(
+            "[yellow]No task provided.[/yellow]\n"
+            "Usage: [bold]localforge plan \"describe the coding task\"[/bold]\n"
+            "Or use [bold cyan]localforge chat[/bold cyan] for interactive mode."
+        )
+        raise typer.Exit(1)
     from localforge.agent.agents import AnalyzerAgent, PlannerAgent
     from localforge.agent.orchestrator import AgentOrchestrator
     from localforge.cli.display import print_plan
@@ -309,7 +351,10 @@ def plan(
     from localforge.retrieval import ContextRetriever
 
     repo = _resolve_repo(repo_path)
-    config = _load_config(repo)
+    overrides: dict[str, object] = {}
+    if model is not None:
+        overrides["model_name"] = model
+    config = _load_config(repo, **overrides)
 
     if not _check_ollama(config):
         raise typer.Exit(1)
@@ -323,7 +368,7 @@ def plan(
     retriever = ContextRetriever(indexer, searcher, config)
 
     try:
-        async def _run_plan():
+        async def _run_plan() -> dict[str, Any]:
             # Phase 1: Retrieve context
             retrieval_result = retriever.retrieve(task, limit=15)
             chunks = retrieval_result.chunks
@@ -381,13 +426,23 @@ def plan(
 
 @app.command("patch")
 def patch(
-    task: str = typer.Argument(..., help="Describe the coding task."),
+    task: str = typer.Argument(
+        None, help="Describe the coding task.",
+    ),
     step: int | None = typer.Option(None, "--step", "-s", help="Execute only this step number."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show patches without applying."),
     auto_approve: bool = typer.Option(False, "--yes", "-y", help="Auto-approve all patches."),
+    model: str | None = typer.Option(None, "--model", "-m", help="Override the Ollama model."),
     repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
 ) -> None:
     """Execute plan steps: generate and apply patches."""
+    if not task:
+        console.print(
+            "[yellow]No task provided.[/yellow]\n"
+            "Usage: [bold]localforge patch \"describe the coding task\"[/bold]\n"
+            "Or use [bold cyan]localforge chat[/bold cyan] for interactive mode."
+        )
+        raise typer.Exit(1)
     from localforge.agent.agents import CoderAgent
     from localforge.agent.orchestrator import AgentOrchestrator
     from localforge.cli.display import confirm_patch as confirm_patch_fn
@@ -398,7 +453,13 @@ def patch(
     from localforge.patching.patcher import FilePatcher
 
     repo = _resolve_repo(repo_path)
-    config = _load_config(repo, dry_run=dry_run, auto_approve=auto_approve)
+    overrides: dict[str, object] = {
+        "dry_run": dry_run,
+        "auto_approve": auto_approve,
+    }
+    if model is not None:
+        overrides["model_name"] = model
+    config = _load_config(repo, **overrides)
 
     # Load last plan
     plan_path = repo / ".localforge" / "last_plan.json"
@@ -431,8 +492,8 @@ def patch(
     asm = ContextAssembler(bm, config)
     patcher = FilePatcher(repo, config)
 
-    try:
-        async def _run_patch():
+    async def _run_patch() -> None:
+        try:
             coder = CoderAgent(ollama, asm, bm, config)
 
             for plan_step in steps_to_run:
@@ -453,7 +514,11 @@ def patch(
                     payload={
                         "task": task,
                         "step": plan_step.model_dump(),
-                        "file_path": plan_step.files_involved[0] if plan_step.files_involved else "",
+                        "file_path": (
+                            plan_step.files_involved[0]
+                            if plan_step.files_involved
+                            else ""
+                        ),
                         "file_content": file_content,
                     },
                     context_chunks=[],
@@ -477,22 +542,24 @@ def patch(
                     continue
 
                 # Confirm
-                if not auto_approve:
-                    if not confirm_patch_fn(patch_op):
-                        console.print("[dim]Skipped.[/dim]")
-                        continue
+                if not auto_approve and not confirm_patch_fn(patch_op):
+                    console.print("[dim]Skipped.[/dim]")
+                    continue
 
                 if patcher.apply_patch(patch_op):
-                    console.print(f"[bold green][OK] Patch applied to {patch_op.file_path}[/bold green]")
+                    console.print(
+                        f"[bold green][OK] Patch applied to"
+                        f" {patch_op.file_path}[/bold green]"
+                    )
                 else:
-                    console.print(f"[bold red][FAIL] Failed to apply patch to {patch_op.file_path}[/bold red]")
-
+                    console.print(
+                        f"[bold red][FAIL] Failed to apply patch to"
+                        f" {patch_op.file_path}[/bold red]"
+                    )
+        finally:
             await ollama.close()
 
-        asyncio.run(_run_patch())
-
-    finally:
-        pass
+    asyncio.run(_run_patch())
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +600,9 @@ def verify(
 
 @app.command("autofix")
 def autofix(
-    task: str = typer.Argument(..., help="Describe the coding task to perform."),
+    task: str = typer.Argument(
+        None, help="Describe the coding task to perform.",
+    ),
     repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
     auto_approve: bool = typer.Option(False, "--yes", "-y", help="Auto-approve all patches."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show patches without applying them."),
@@ -546,6 +615,13 @@ def autofix(
     ),
 ) -> None:
     """Run the full agent pipeline: analyze, plan, patch, verify, and iterate."""
+    if not task:
+        console.print(
+            "[yellow]No task provided.[/yellow]\n"
+            "Usage: [bold]localforge autofix \"describe the task\"[/bold]\n"
+            "Or use [bold cyan]localforge chat[/bold cyan] for interactive mode."
+        )
+        raise typer.Exit(1)
     from localforge.agent.orchestrator import AgentOrchestrator
     from localforge.cli.display import print_banner
     from localforge.context_manager.assembler import ContextAssembler
@@ -584,8 +660,32 @@ def autofix(
     if not _check_ollama(config):
         raise typer.Exit(1)
 
+    # Auto-detect model context window
+    from localforge.core.ollama_client import OllamaClient as _OllamaClient
+
+    async def _detect_ctx() -> int:
+        _client = _OllamaClient(config)
+        try:
+            return await _client.detect_context_window()
+        finally:
+            await _client.close()
+
+    detected_ctx = asyncio.run(_detect_ctx())
+    if detected_ctx != config.max_context_tokens:
+        config = config.model_copy(update={"max_context_tokens": detected_ctx})
+        console.print(f"  [bold]Context :[/bold] {detected_ctx} tokens (auto-detected)")
+
     # Ensure the repository is indexed
     _ensure_index(repo, config)
+
+    # Git checkpoint before changes
+    from localforge.core.git_utils import create_checkpoint, is_git_repo
+
+    is_git = is_git_repo(repo)
+    if is_git and not dry_run:
+        sha = create_checkpoint(repo, f"localforge: pre-autofix checkpoint ({task[:50]})")
+        if sha:
+            console.print(f"  [bold]Git    :[/bold] checkpoint created ({sha[:8]})")
 
     # Build the full agent stack
     ollama = OllamaClient(config)
@@ -608,7 +708,7 @@ def autofix(
     )
 
     try:
-        async def _run_autofix():
+        async def _run_autofix() -> MultiAgentState:
             result = await orchestrator.run(task)
             await ollama.close()
             return result
@@ -623,6 +723,12 @@ def autofix(
         from localforge.agent.display import OrchestratorDisplay
 
         OrchestratorDisplay().show_summary(final_state)
+
+    # Git checkpoint after changes
+    if is_git and not dry_run:
+        sha = create_checkpoint(repo, f"localforge: {task[:70]}")
+        if sha:
+            console.print(f"\n[bold green]Git commit created:[/bold green] {sha[:8]}")
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +829,8 @@ def status(
     initialized = localforge_dir.is_dir()
     console.print(
         Panel(
-            f"[bold]Initialized:[/bold] {'[green]Yes[/green]' if initialized else '[red]No[/red]'}\n"
+            f"[bold]Initialized:[/bold] "
+            f"{'[green]Yes[/green]' if initialized else '[red]No[/red]'}\n"
             f"[bold]Repo path  :[/bold] {repo}\n"
             f"[bold]Model      :[/bold] {config.model_name}\n"
             f"[bold]Profile    :[/bold] {config.model_profile.value}",
@@ -754,7 +861,7 @@ def status(
         console.print("[yellow]Index not built yet. Run:[/yellow] localforge index")
 
     # -- Ollama status -------------------------------------------------
-    async def _check_ollama_status():
+    async def _check_ollama_status() -> tuple[bool, list[str]]:
         ollama = OllamaClient(config)
         try:
             healthy = await ollama.health_check()
@@ -794,6 +901,369 @@ def status(
         state_files = list(states_dir.glob("*.json"))
         if state_files:
             console.print(f"[dim]Saved state snapshots: {len(state_files)}[/dim]")
+
+    # -- Git info ------------------------------------------------------
+    from localforge.core.git_utils import get_changed_files, get_current_branch, is_git_repo
+
+    if is_git_repo(repo):
+        branch = get_current_branch(repo)
+        changed = get_changed_files(repo)
+        console.print(f"\n[bold]Git branch:[/bold] {branch or '(detached)'}")
+        if changed:
+            console.print(f"[bold]Changed files:[/bold] {len(changed)}")
+            for f in changed[:10]:
+                console.print(f"  [yellow]{f}[/yellow]")
+            if len(changed) > 10:
+                console.print(f"  [dim]… and {len(changed) - 10} more[/dim]")
+        else:
+            console.print("[dim]Working tree clean.[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# 10. chat — interactive REPL
+# ---------------------------------------------------------------------------
+
+
+@app.command("chat")
+def chat(
+    repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
+    model: str | None = typer.Option(None, "--model", "-m", help="Override the Ollama model."),
+) -> None:
+    """Start an interactive chat session about your codebase."""
+    from localforge.chat.engine import ChatEngine
+    from localforge.core.ollama_client import OllamaClient
+
+    repo = _resolve_repo(repo_path)
+    overrides: dict[str, object] = {}
+    if model is not None:
+        overrides["model_name"] = model
+    config = _load_config(repo, **overrides)
+
+    if not _check_ollama(config):
+        raise typer.Exit(1)
+
+    # Auto-detect model context window
+    async def _detect_ctx() -> int:
+        _client = OllamaClient(config)
+        try:
+            return await _client.detect_context_window()
+        finally:
+            await _client.close()
+
+    detected_ctx = asyncio.run(_detect_ctx())
+    if detected_ctx > config.max_context_tokens:
+        # Use the model's actual context window if larger than the default
+        config = config.model_copy(update={"max_context_tokens": detected_ctx})
+        console.print(
+            f"[dim]Context window: {detected_ctx:,} tokens (auto-detected from model)[/dim]"
+        )
+
+    _ensure_index(repo, config)
+
+    ollama = OllamaClient(config)
+    engine = ChatEngine(config, ollama, repo)
+
+    async def _run_chat() -> None:
+        try:
+            await engine.run_repl()
+        finally:
+            await ollama.close()
+
+    asyncio.run(_run_chat())
+
+
+# ---------------------------------------------------------------------------
+# 11. rollback
+# ---------------------------------------------------------------------------
+
+
+@app.command("rollback")
+def rollback(
+    backup_timestamp: str | None = typer.Argument(
+        None, help="Backup timestamp to rollback to. Omit to list available backups."
+    ),
+    repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
+) -> None:
+    """Rollback file changes to a previous backup state."""
+    from localforge.patching.patcher import FilePatcher
+
+    repo = _resolve_repo(repo_path)
+    config = _load_config(repo)
+    backup_root = repo / ".localforge" / "backups"
+
+    if not backup_root.is_dir():
+        console.print("[dim]No backups found. Nothing to rollback.[/dim]")
+        raise typer.Exit(0)
+
+    available = sorted(
+        [d.name for d in backup_root.iterdir() if d.is_dir()],
+        reverse=True,
+    )
+
+    if not available:
+        console.print("[dim]No backup timestamps found.[/dim]")
+        raise typer.Exit(0)
+
+    if backup_timestamp is None:
+        console.print("[bold]Available backups:[/bold]")
+        for ts in available[:20]:
+            console.print(f"  {ts}")
+        console.print("\n[dim]Use: localforge rollback <timestamp>[/dim]")
+        raise typer.Exit(0)
+
+    patcher = FilePatcher(repo, config)
+    if patcher.rollback(backup_timestamp):
+        console.print(f"[bold green]Successfully rolled back to {backup_timestamp}[/bold green]")
+    else:
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# 11. search
+# ---------------------------------------------------------------------------
+
+
+@app.command("search")
+def search(
+    query: str = typer.Argument(..., help="Search query (text, filename, or symbol)."),
+    mode: str = typer.Option(
+        "all", "--mode", "-m",
+        help="Search mode: all, text, filename, symbol.",
+    ),
+    limit: int = typer.Option(10, "--limit", "-n", help="Max results."),
+    repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
+) -> None:
+    """Search the codebase index for text, filenames, or symbols."""
+    from localforge.cli.display import print_chunks
+    from localforge.index import IndexSearcher
+
+    repo = _resolve_repo(repo_path)
+    config = _load_config(repo)
+
+    db_path = repo / config.index_db_path
+    if not db_path.is_file():
+        console.print(
+            "[bold red]No index found.[/bold red] "
+            "Run [bold]localforge index[/bold] first."
+        )
+        raise typer.Exit(1)
+
+    searcher = IndexSearcher(db_path)
+
+    try:
+        if mode in ("all", "text"):
+            results = searcher.search_lexical(query, limit=limit)
+            if results:
+                console.print(f"\n[bold cyan]Text matches ({len(results)}):[/bold cyan]")
+                print_chunks(results)
+
+        if mode in ("all", "filename"):
+            results = searcher.search_by_filename(query, limit=limit)
+            if results:
+                console.print(f"\n[bold cyan]Filename matches ({len(results)}):[/bold cyan]")
+                for r in results:
+                    console.print(f"  [green]{r.file_path}[/green] (score: {r.score:.2f})")
+
+        if mode in ("all", "symbol"):
+            sym_results = searcher.search_symbols(query)
+            if sym_results:
+                console.print(f"\n[bold cyan]Symbol matches ({len(sym_results)}):[/bold cyan]")
+                for s in sym_results[:limit]:
+                    console.print(
+                        f"  [yellow]{s['kind']}[/yellow] [bold]{s['name']}[/bold] "
+                        f"in [green]{s['file_path']}[/green] line {s['line']}"
+                    )
+
+        if mode not in ("all", "text", "filename", "symbol"):
+            console.print(f"[red]Unknown mode: {mode}. Use: all, text, filename, symbol[/red]")
+            raise typer.Exit(1)
+
+    finally:
+        searcher.close()
+
+
+# ---------------------------------------------------------------------------
+# 12. models — list available models
+# ---------------------------------------------------------------------------
+
+
+@app.command("models")
+def models(
+    repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
+) -> None:
+    """List all available models on your Ollama instance."""
+    from localforge.core.ollama_client import OllamaClient
+
+    repo = _resolve_repo(repo_path)
+    config = _load_config(repo)
+
+    async def _list_models() -> list[str]:
+        client = OllamaClient(config)
+        try:
+            return await client.list_models()
+        finally:
+            await client.close()
+
+    if not _check_ollama(config):
+        raise typer.Exit(1)
+
+    model_list = asyncio.run(_list_models())
+
+    if not model_list:
+        console.print("[yellow]No models found on your Ollama instance.[/yellow]")
+        console.print("[dim]Run: ollama pull <model-name>[/dim]")
+        raise typer.Exit(0)
+
+    current_model = config.model_name
+    table = Table(title="Available Models on Ollama", show_header=True)
+    table.add_column("Model", style="cyan")
+    table.add_column("Status", justify="center")
+
+    for model_name in sorted(model_list):
+        is_current = "✓ current" if model_name == current_model else ""
+        style = "green" if is_current else ""
+        table.add_row(model_name, is_current, style=style)
+
+    console.print(table)
+    console.print(
+        f"\n[bold]Current default model:[/bold] [cyan]{current_model}[/cyan]"
+    )
+    console.print("[dim]Tip: Use 'localforge set-model' to change the default[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# 13. set-model — set default model
+# ---------------------------------------------------------------------------
+
+
+@app.command("set-model")
+def set_model(
+    model_name: str | None = typer.Argument(None, help="Model name to set as default (e.g., qwen2.5-coder:14b). If omitted, shows available models for interactive selection."),
+    repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
+) -> None:
+    """Set your default model or interactively choose from available models."""
+    from localforge.core.ollama_client import OllamaClient
+
+    repo = _resolve_repo(repo_path)
+    config = _load_config(repo)
+    localforge_dir = repo / ".localforge"
+
+    if not localforge_dir.is_dir():
+        console.print(
+            "[bold red]Error:[/bold red] .localforge directory not found.\n"
+            "[dim]Run 'localforge init' first.[/dim]"
+        )
+        raise typer.Exit(1)
+
+    async def _fetch_models() -> list[str]:
+        client = OllamaClient(config)
+        try:
+            return await client.list_models()
+        finally:
+            await client.close()
+
+    if not _check_ollama(config):
+        raise typer.Exit(1)
+
+    available_models = asyncio.run(_fetch_models())
+
+    if not available_models:
+        console.print("[yellow]No models found on your Ollama instance.[/yellow]")
+        console.print("[dim]Run: ollama pull <model-name>[/dim]")
+        raise typer.Exit(0)
+
+    # If model name is provided, use it directly
+    selected_model = model_name
+    if not selected_model:
+        # Interactive selection
+        console.print("\n[bold cyan]Available models:[/bold cyan]")
+        for i, m in enumerate(sorted(available_models), 1):
+            current_marker = " ← current" if m == config.model_name else ""
+            console.print(f"  {i:2d}. {m}{current_marker}")
+
+        console.print()
+        try:
+            choice = typer.prompt("Select model number", type=int)
+            if 1 <= choice <= len(available_models):
+                sorted_models = sorted(available_models)
+                selected_model = sorted_models[choice - 1]
+            else:
+                console.print("[red]Invalid choice.[/red]")
+                raise typer.Exit(1)
+        except ValueError:
+            console.print("[red]Invalid input. Please enter a number.[/red]")
+            raise typer.Exit(1)
+    else:
+        # Validate that the provided model exists
+        if selected_model not in available_models:
+            console.print(
+                f"[red]Error:[/red] Model '{selected_model}' not found on your Ollama instance.\n"
+                f"[dim]Available models: {', '.join(sorted(available_models)[:5])}...[/dim]"
+            )
+            raise typer.Exit(1)
+
+    # Update config file while preserving existing comments/formatting.
+    config_path = localforge_dir / "config.yml"
+    try:
+        existing_text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        existing_text = ""
+
+    model_line = f'model_name: "{selected_model}"'
+    if existing_text:
+        pattern = re.compile(r"^\s*model_name\s*:\s*.*$", re.MULTILINE)
+        if pattern.search(existing_text):
+            new_text = pattern.sub(model_line, existing_text, count=1)
+        else:
+            new_text = f"{model_line}\n{existing_text}"
+    else:
+        new_text = f"{model_line}\n"
+
+    config_path.write_text(new_text, encoding="utf-8")
+
+    console.print(
+        f"\n[green]✓ Default model updated to:[/green] "
+        f"[bold cyan]{selected_model}[/bold cyan]"
+    )
+    console.print(f"[dim]Saved to: {config_path.relative_to(repo)}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# 14. history — show past task runs
+# ---------------------------------------------------------------------------
+
+
+@app.command("history")
+def history(
+    repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
+) -> None:
+    """Show history of previous localforge task runs."""
+    from localforge.agent.state_manager import StateManager
+
+    repo = _resolve_repo(repo_path)
+    mgr = StateManager(str(repo / ".localforge" / "states"))
+    states = mgr.list_states()
+
+    if not states:
+        console.print("[dim]No task history found.[/dim]")
+        raise typer.Exit(0)
+
+    table = Table(title="Task History")
+    table.add_column("#", style="bold", width=4)
+    table.add_column("Task")
+    table.add_column("Iterations", justify="right", width=10)
+    table.add_column("Messages", justify="right", width=10)
+
+    for i, s in enumerate(states[:20], 1):
+        task_preview = s["task"][:80] + "…" if len(s["task"]) > 80 else s["task"]
+        table.add_row(
+            str(i),
+            task_preview,
+            str(s["iteration"]),
+            str(s["messages"]),
+        )
+
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------

@@ -47,7 +47,7 @@ class OrchestratorDisplay:
         table.add_column("Operation", width=10)
         table.add_column("Status", width=12)
 
-        _STATUS_STYLE = {
+        status_style = {
             "PENDING": "yellow",
             "IN_PROGRESS": "cyan",
             "COMPLETED": "green",
@@ -56,7 +56,7 @@ class OrchestratorDisplay:
         }
 
         for s in plan.steps:
-            style = _STATUS_STYLE.get(s.status.value, "")
+            style = status_style.get(s.status.value, "")
             table.add_row(
                 str(s.step_id),
                 s.description,

@@ -126,6 +126,50 @@ pip install -e ".[dev]"
 localforge --version
 ```
 
+If your shell says `localforge` is not recognized, run:
+
+```bash
+py -m localforge --version
+```
+
+If that works, LocalForge is installed correctly and only your user `Scripts`
+directory is missing from `PATH` (common on Windows when pip falls back to a
+`--user` install). LocalForge now attempts a one-time automatic PATH bootstrap
+when run as `py -m localforge ...` on Windows.
+
+### Windows PATH fix (one-time)
+
+In PowerShell:
+
+```powershell
+$userBase = py -m site --user-base
+$scripts = Join-Path $userBase "Scripts"
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$scripts", "User")
+```
+
+Or use LocalForge's built-in helper:
+
+```powershell
+py -m localforge setup-shell
+```
+
+Close and reopen your terminal, then verify:
+
+```powershell
+localforge --version
+```
+
+### Most reliable CLI install on fresh machines
+
+`pipx` installs command-line tools in isolated environments and wires PATH for
+you:
+
+```bash
+py -m pip install --user pipx
+py -m pipx ensurepath
+pipx install localforge
+```
+
 ---
 
 ## Quick Start

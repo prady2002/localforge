@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import re
+import site
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -47,6 +48,84 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 
+def _path_contains_entry(path_value: str, candidate: str) -> bool:
+    candidate_norm = os.path.normcase(os.path.normpath(candidate))
+    entries = [p.strip() for p in path_value.split(os.pathsep) if p.strip()]
+    return any(os.path.normcase(os.path.normpath(p)) == candidate_norm for p in entries)
+
+
+def _windows_user_scripts_dir() -> Path:
+    return Path(site.getuserbase()) / "Scripts"
+
+
+def ensure_windows_scripts_on_path(persist_user_path: bool = True) -> tuple[bool, str]:
+    """Ensure the Windows user Scripts dir is present in PATH.
+
+    Returns (changed, message).
+    """
+    if sys.platform != "win32":
+        return False, "PATH setup is only needed on Windows."
+
+    scripts_dir = str(_windows_user_scripts_dir())
+    current_path = os.environ.get("PATH", "")
+    changed = False
+
+    if not _path_contains_entry(current_path, scripts_dir):
+        os.environ["PATH"] = f"{current_path}{os.pathsep}{scripts_dir}" if current_path else scripts_dir
+        changed = True
+
+    if not persist_user_path:
+        if changed:
+            return True, f"Added to current session PATH: {scripts_dir}"
+        return False, f"Scripts directory already present in current PATH: {scripts_dir}"
+
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Environment",
+            0,
+            winreg.KEY_READ | winreg.KEY_SET_VALUE,
+        ) as key:
+            try:
+                user_path, reg_type = winreg.QueryValueEx(key, "Path")
+                if not isinstance(user_path, str):
+                    user_path = ""
+            except FileNotFoundError:
+                user_path, reg_type = "", winreg.REG_EXPAND_SZ
+
+            if not _path_contains_entry(user_path, scripts_dir):
+                new_user_path = (
+                    f"{user_path}{os.pathsep}{scripts_dir}" if user_path else scripts_dir
+                )
+                winreg.SetValueEx(key, "Path", 0, reg_type, new_user_path)
+                changed = True
+
+    except OSError as exc:
+        return changed, f"Could not persist PATH automatically: {exc}"
+
+    if changed:
+        return True, (
+            f"Added Scripts directory to user PATH: {scripts_dir}. "
+            "Open a new terminal for changes to take effect."
+        )
+    return False, f"Scripts directory already present in user PATH: {scripts_dir}"
+
+
+def bootstrap_windows_scripts_path() -> None:
+    """Best-effort PATH bootstrap for `py -m localforge` on Windows."""
+    if sys.platform != "win32":
+        return
+
+    # Allow users to opt out of automatic PATH edits.
+    if os.environ.get("LOCALFORGE_NO_PATH_BOOTSTRAP", "").strip() in {"1", "true", "yes"}:
+        return
+
+    with contextlib.suppress(Exception):
+        ensure_windows_scripts_on_path(persist_user_path=True)
+
+
 def _version_callback(value: bool) -> None:
     if value:
         console.print(f"[bold]localforge[/bold] {__version__}")
@@ -66,6 +145,23 @@ def _load_config(repo_path: Path, **overrides: object) -> LocalForgeConfig:  # n
     overrides["repo_path"] = str(repo_path)
     cfg = LocalForgeConfig(**{**cfg.model_dump(), **overrides})
     return cfg
+
+
+@app.command("setup-shell")
+def setup_shell(
+    persist: bool = typer.Option(
+        True,
+        "--persist/--session",
+        help="Persist to user PATH (default) or only update current session PATH.",
+    ),
+) -> None:
+    """Ensure LocalForge CLI is discoverable by your shell."""
+    changed, message = ensure_windows_scripts_on_path(persist_user_path=persist)
+
+    if changed:
+        console.print(f"[bold green]PATH updated:[/bold green] {message}")
+    else:
+        console.print(f"[dim]{message}[/dim]")
 
 
 def _check_ollama(config: LocalForgeConfig) -> bool:  # noqa: ANN001

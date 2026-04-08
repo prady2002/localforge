@@ -106,11 +106,47 @@ and iterate — all using a local LLM through [Ollama](https://ollama.com).
 
 ## Installation
 
-### From PyPI (recommended)
+### Recommended: pipx (zero-friction, works immediately)
+
+[`pipx`](https://pipx.pypa.io) installs CLI tools in isolated environments and
+automatically wires them into your PATH — no manual setup, works on the first
+try on any machine.
+
+```bash
+# Install pipx (once per machine)
+py -m pip install --user pipx
+py -m pipx ensurepath
+```
+
+Close and reopen your terminal, then:
+
+```bash
+pipx install localforge
+localforge --version   # works immediately
+```
+
+> **Windows users:** `pipx ensurepath` handles PATH for you. After running it
+> once, every subsequent `pipx install <tool>` just works.
+
+### Alternative: plain pip
 
 ```bash
 pip install localforge
 ```
+
+> **Note:** On Windows, `pip install` may place the `localforge` command in a
+> Scripts directory that is not yet on your PATH. If `localforge` is not
+> recognised after install, run the one-time fix below and restart your
+> terminal.
+
+#### Windows PATH fix (one time only)
+
+```powershell
+py -m localforge setup-shell
+```
+
+Then **close and reopen your terminal** — `localforge` will work from that
+point on, permanently.
 
 ### From source (development)
 
@@ -118,56 +154,6 @@ pip install localforge
 git clone https://github.com/localforge/localforge.git
 cd localforge
 pip install -e ".[dev]"
-```
-
-### Verify installation
-
-```bash
-localforge --version
-```
-
-If your shell says `localforge` is not recognized, run:
-
-```bash
-py -m localforge --version
-```
-
-If that works, LocalForge is installed correctly and only your user `Scripts`
-directory is missing from `PATH` (common on Windows when pip falls back to a
-`--user` install). LocalForge now attempts a one-time automatic PATH bootstrap
-when run as `py -m localforge ...` on Windows.
-
-### Windows PATH fix (one-time)
-
-In PowerShell:
-
-```powershell
-$userBase = py -m site --user-base
-$scripts = Join-Path $userBase "Scripts"
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$scripts", "User")
-```
-
-Or use LocalForge's built-in helper:
-
-```powershell
-py -m localforge setup-shell
-```
-
-Close and reopen your terminal, then verify:
-
-```powershell
-localforge --version
-```
-
-### Most reliable CLI install on fresh machines
-
-`pipx` installs command-line tools in isolated environments and wires PATH for
-you:
-
-```bash
-py -m pip install --user pipx
-py -m pipx ensurepath
-pipx install localforge
 ```
 
 ---

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import site
+import sysconfig
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -55,6 +56,11 @@ def _path_contains_entry(path_value: str, candidate: str) -> bool:
 
 
 def _windows_user_scripts_dir() -> Path:
+    # Use the active interpreter's user scheme (e.g. ...\Python313\Scripts).
+    scheme = sysconfig.get_preferred_scheme("user")
+    scripts = sysconfig.get_path("scripts", scheme=scheme)
+    if scripts:
+        return Path(scripts)
     return Path(site.getuserbase()) / "Scripts"
 
 

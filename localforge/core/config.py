@@ -32,7 +32,7 @@ class ModelProfileSettings:
 
 _PROFILE_MAP: dict[ModelProfile, ModelProfileSettings] = {
     ModelProfile.SMALL: ModelProfileSettings(
-        context_window=4096,
+        context_window=8192,
         reasoning_depth=2,
         retrieval_limit=5,
         chunk_size=512,

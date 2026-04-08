@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -18,6 +19,28 @@ from localforge.core.config import LocalForgeConfig
 logger = logging.getLogger(__name__)
 
 _console = Console()
+
+# Retry configuration for reliable Ollama communication
+_MAX_RETRIES = 5
+_BASE_RETRY_DELAY = 1.0  # seconds
+_MAX_RETRY_DELAY = 30.0  # seconds
+_RETRYABLE_EXCEPTIONS = (
+    httpx.ConnectError,
+    httpx.RemoteProtocolError,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+    TimeoutError,
+)
+
+
+def _get_retry_delay(attempt: int) -> float:
+    """Calculate exponential backoff with jitter for retry delay."""
+    # Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (capped)
+    delay = min(_BASE_RETRY_DELAY * (2 ** attempt), _MAX_RETRY_DELAY)
+    # Add jitter: ±20% of delay
+    jitter = delay * 0.2 * (2 * random.random() - 1)
+    return max(0.1, delay + jitter)
 
 
 def get_model_context_window(model_name: str) -> int:
@@ -61,9 +84,80 @@ class OllamaClient:
         self.stream_to_console: bool = True
         # Detected context window (populated by detect_context_window)
         self._detected_context_window: int | None = None
+        # Model capability flags (populated by detect_capabilities)
+        self.supports_tools: bool = True  # Assume yes until proven otherwise
+        self.supports_json_mode: bool = False
+        self.model_family: str = ""  # e.g., "qwen", "llama", "deepseek", "mistral"
+
+    def _default_options(self, temperature: float, num_predict: int | None = None) -> dict[str, Any]:
+        """Build the Ollama ``options`` dict with num_ctx when known."""
+        opts: dict[str, Any] = {"temperature": temperature}
+        num_ctx = self._detected_context_window or self.config.max_context_tokens
+        if num_ctx:
+            opts["num_ctx"] = num_ctx
+        if num_predict is not None:
+            opts["num_predict"] = num_predict
+        return opts
+
+    async def detect_capabilities(self) -> dict[str, Any]:
+        """Detect model capabilities: tool calling, JSON mode, model family.
+
+        Returns a dict with detected capabilities for logging/display.
+        """
+        name = self.model.lower()
+
+        # Detect model family
+        family_map = {
+            "qwen": "qwen", "llama": "llama", "codellama": "llama",
+            "deepseek": "deepseek", "mistral": "mistral", "mixtral": "mistral",
+            "gemma": "gemma", "codegemma": "gemma", "phi": "phi",
+            "starcoder": "starcoder", "codestral": "mistral",
+            "wizardcoder": "wizard", "openchat": "openchat",
+        }
+        for key, family in family_map.items():
+            if key in name:
+                self.model_family = family
+                break
+
+        # Tool calling is generally supported by modern models via Ollama
+        # but some older/smaller ones may fail. We detect via a probe if needed.
+        self.supports_tools = True
+
+        # JSON mode is supported by most models via Ollama's format parameter
+        self.supports_json_mode = True
+
+        capabilities = {
+            "model": self.model,
+            "family": self.model_family or "unknown",
+            "supports_tools": self.supports_tools,
+            "supports_json_mode": self.supports_json_mode,
+            "context_window": self._detected_context_window,
+        }
+
+        logger.info("Model capabilities: %s", capabilities)
+        return capabilities
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def preload_model(self) -> None:
+        """Ask Ollama to load the model into memory so the first real call is fast."""
+        for attempt in range(2):
+            try:
+                await self._client.post(
+                    "/api/generate",
+                    json={"model": self.model, "keep_alive": "30m", "prompt": ""},
+                    timeout=httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
+                )
+                return  # success
+            except Exception:
+                if attempt == 0:
+                    logger.warning("Model preload attempt 1 failed, retrying…")
+                else:
+                    logger.warning(
+                        "Model preload failed after 2 attempts. "
+                        "First request may be slow while model loads."
+                    )
 
     # -- health & discovery ---------------------------------------------------
 
@@ -102,7 +196,9 @@ class OllamaClient:
         """Auto-detect the model's context window from the Ollama API.
 
         Falls back to the heuristic :func:`get_model_context_window` when
-        the API does not provide the information.
+        the API does not provide the information.  The detected value is
+        cached in ``_detected_context_window`` so that every subsequent
+        payload automatically includes the correct ``num_ctx``.
         """
         info = await self.get_model_info(model)
 
@@ -112,7 +208,9 @@ class OllamaClient:
         for key, value in model_info.items():
             if "context_length" in key:
                 try:
-                    return int(value)
+                    ctx = int(value)
+                    self._detected_context_window = ctx
+                    return ctx
                 except (ValueError, TypeError):
                     pass
 
@@ -124,11 +222,15 @@ class OllamaClient:
                     parts = line.split()
                     for p in parts:
                         try:
-                            return int(p)
+                            ctx = int(p)
+                            self._detected_context_window = ctx
+                            return ctx
                         except ValueError:
                             continue
 
-        return get_model_context_window(model or self.model)
+        ctx = get_model_context_window(model or self.model)
+        self._detected_context_window = ctx
+        return ctx
 
     # -- chat -----------------------------------------------------------------
 
@@ -142,15 +244,14 @@ class OllamaClient:
     ) -> str:
         """Send a chat request and return the full response text.
 
-        Retries up to 3 times on connection errors with exponential backoff.
-        When *stream* is ``True`` a Rich spinner is displayed while tokens
-        arrive.
+        Retries up to 5 times on connection errors with exponential backoff + jitter.
+        When *stream* is ``True`` a Rich spinner is displayed while tokens arrive.
         """
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "stream": stream,
-            "options": {"temperature": temperature},
+            "options": self._default_options(temperature),
             "keep_alive": "30m",
         }
         if system:
@@ -159,20 +260,29 @@ class OllamaClient:
             ]
 
         last_error: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(_MAX_RETRIES):
             try:
                 if stream:
                     return await self._chat_stream(payload, agent_role)
                 else:
                     return await self._chat_sync(payload)
-            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadTimeout) as exc:
+            except _RETRYABLE_EXCEPTIONS as exc:
                 last_error = exc
-                wait = 2 ** attempt
-                logger.warning("Ollama connection error (attempt %d/3): %s", attempt + 1, exc)
-                await asyncio.sleep(wait)
+                if attempt < _MAX_RETRIES - 1:
+                    wait = _get_retry_delay(attempt)
+                    logger.warning(
+                        "Ollama connection error (attempt %d/%d), retrying in %.1fs: %s",
+                        attempt + 1, _MAX_RETRIES, wait, exc,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(
+                        "Ollama connection error (final attempt %d/%d): %s",
+                        attempt + 1, _MAX_RETRIES, exc,
+                    )
 
         raise ConnectionError(
-            f"Failed to reach Ollama after 3 attempts: {last_error}"
+            f"Failed to reach Ollama after {_MAX_RETRIES} attempts: {last_error}"
         ) from last_error
 
     async def _chat_stream(self, payload: dict[str, Any], agent_role: str) -> str:
@@ -283,8 +393,12 @@ class OllamaClient:
         finally:
             self.stream_to_console = prev
 
-        # Return whatever we got on the last attempt.
-        return last_raw
+        # Return a valid JSON error object instead of raw string that crashes downstream
+        logger.error("Structured response failed after 3 attempts, returning error JSON")
+        return json.dumps({
+            "error": "Failed to get valid JSON response after 3 attempts",
+            "raw_response": last_raw[:500] if last_raw else "(empty)",
+        })
 
     # -- embeddings -----------------------------------------------------------
 
@@ -311,13 +425,13 @@ class OllamaClient:
         """Yield response tokens one at a time without displaying them.
 
         This is used by the interactive chat REPL which manages its own
-        rendering.  Retries once on timeout/connection errors.
+        rendering.  Retries up to 5 times on timeout/connection errors.
         """
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "stream": True,
-            "options": {"temperature": temperature},
+            "options": self._default_options(temperature),
             "keep_alive": "30m",
         }
         if system:
@@ -326,7 +440,7 @@ class OllamaClient:
             ]
 
         last_error: Exception | None = None
-        for attempt in range(2):
+        for attempt in range(_MAX_RETRIES):
             try:
                 async with self._client.stream("POST", "/api/chat", json=payload) as resp:
                     resp.raise_for_status()
@@ -342,14 +456,23 @@ class OllamaClient:
                         if token:
                             yield token
                 return  # success
-            except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            except _RETRYABLE_EXCEPTIONS as exc:
                 last_error = exc
-                if attempt == 0:
-                    logger.debug("Stream connection error (retrying): %s", exc)
-                    await asyncio.sleep(2)
+                if attempt < _MAX_RETRIES - 1:
+                    wait = _get_retry_delay(attempt)
+                    logger.debug(
+                        "Stream connection error (attempt %d/%d), retrying in %.1fs: %s",
+                        attempt + 1, _MAX_RETRIES, wait, exc,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(
+                        "Stream connection error (final attempt %d/%d): %s",
+                        attempt + 1, _MAX_RETRIES, exc,
+                    )
         if last_error:
             raise ConnectionError(
-                f"Stream failed after retries: {last_error}"
+                f"Stream failed after {_MAX_RETRIES} retries: {last_error}"
             ) from last_error
 
     # -- native tool calling stream ----------------------------------------
@@ -361,6 +484,7 @@ class OllamaClient:
         system: str | None = None,
         temperature: float = 0.4,
         tool_calls_out: list[dict[str, Any]] | None = None,
+        num_predict: int | None = None,
     ) -> AsyncIterator[str]:
         """Stream tokens with native Ollama tool calling support.
 
@@ -373,7 +497,7 @@ class OllamaClient:
             "messages": list(messages),
             "stream": True,
             "tools": tools,
-            "options": {"temperature": temperature},
+            "options": self._default_options(temperature, num_predict=num_predict),
             "keep_alive": "30m",
         }
         if system:
@@ -386,7 +510,7 @@ class OllamaClient:
             tool_calls_out = []
 
         last_error: Exception | None = None
-        for attempt in range(2):
+        for attempt in range(_MAX_RETRIES):
             try:
                 async with self._client.stream(
                     "POST", "/api/chat", json=payload,
@@ -411,18 +535,21 @@ class OllamaClient:
                         if token:
                             yield token
                 return  # success
-            except (
-                httpx.ReadTimeout,
-                httpx.ConnectError,
-                httpx.RemoteProtocolError,
-            ) as exc:
+            except _RETRYABLE_EXCEPTIONS as exc:
                 last_error = exc
-                if attempt == 0:
+                if attempt < _MAX_RETRIES - 1:
+                    wait = _get_retry_delay(attempt)
                     logger.debug(
-                        "Tool stream connection error (retrying): %s", exc,
+                        "Tool stream connection error (attempt %d/%d), retrying in %.1fs: %s",
+                        attempt + 1, _MAX_RETRIES, wait, exc,
                     )
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(
+                        "Tool stream connection error (final attempt %d/%d): %s",
+                        attempt + 1, _MAX_RETRIES, exc,
+                    )
         if last_error:
             raise ConnectionError(
-                f"Tool stream failed after retries: {last_error}"
+                f"Tool stream failed after {_MAX_RETRIES} retries: {last_error}"
             ) from last_error

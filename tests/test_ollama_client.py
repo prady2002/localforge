@@ -118,7 +118,7 @@ async def test_chat_structured_retries_on_invalid_json(
 async def test_chat_retry_on_connection_error(
     client: OllamaClient, mocker,
 ) -> None:
-    """chat() should retry up to 3 times on connection errors, then raise."""
+    """chat() should retry up to 5 times on connection errors, then raise."""
     mocker.patch.object(
         client, "_chat_stream",
         side_effect=httpx.ConnectError("refused"),
@@ -131,8 +131,8 @@ async def test_chat_retry_on_connection_error(
             stream=True,
         )
 
-    # _chat_stream should have been called 3 times
-    assert client._chat_stream.call_count == 3
+    # _chat_stream should have been called 5 times (max retries)
+    assert client._chat_stream.call_count == 5
 
 
 # ---------------------------------------------------------------------------

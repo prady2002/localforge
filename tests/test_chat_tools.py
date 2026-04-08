@@ -164,6 +164,36 @@ class TestRunCommand:
         result = executor.execute("run_command", {"command": ""})
         assert "Error" in result
 
+    def test_normalize_ruff_fix_command(self, executor: ToolExecutor):
+        normalized = executor._normalize_ruff_command("ruff --fix .")
+        assert normalized == "ruff check . --fix"
+
+    def test_normalize_ruff_dot_command(self, executor: ToolExecutor):
+        normalized = executor._normalize_ruff_command("ruff .")
+        assert normalized == "ruff check ."
+
+    def test_normalize_non_ruff_command_unchanged(self, executor: ToolExecutor):
+        normalized = executor._normalize_ruff_command("python -m pytest -q")
+        assert normalized == "python -m pytest -q"
+
+
+class TestActionRoutingHeuristics:
+    def test_fast_action_simple_ruff_check(self):
+        """A simple 'run ruff check .' without fix intent IS a fast action."""
+        assert ChatEngine._is_fast_action_query("run ruff check .")
+
+    def test_not_fast_action_when_fix_requested(self):
+        """'run ruff and fix issues' is multi-step work, NOT a fast action."""
+        assert not ChatEngine._is_fast_action_query("run ruff check . and fix issues")
+
+    def test_not_fast_action_for_deep_refactor_prompt(self):
+        assert not ChatEngine._is_fast_action_query(
+            "refactor architecture and edit multiple modules with tests"
+        )
+
+    def test_fast_action_simple_pytest(self):
+        assert ChatEngine._is_fast_action_query("run pytest tests/ -v")
+
 
 # ── search_code tool ─────────────────────────────────────────────────────
 
@@ -426,6 +456,34 @@ class TestIsLazyResponse:
         assert ChatEngine._is_lazy_response(text) is False
 
 
+# ── _is_premature_handoff detection ──────────────────────────────────────
+
+class TestIsPrematureHandoff:
+    def test_detects_please_review(self):
+        text = (
+            "I ran ruff check and found some issues. "
+            "Please review the output to see if there are any specific "
+            "issues that need manual attention."
+        )
+        assert ChatEngine._is_premature_handoff(text) is True
+
+    def test_detects_let_me_know(self):
+        text = "The command ran successfully. Let me know if you need anything else."
+        assert ChatEngine._is_premature_handoff(text) is True
+
+    def test_detects_would_you_like(self):
+        text = "I found 5 lint errors. Would you like me to fix them?"
+        assert ChatEngine._is_premature_handoff(text) is True
+
+    def test_allows_actual_completion(self):
+        text = "All ruff issues have been fixed and verified. No errors remain."
+        assert ChatEngine._is_premature_handoff(text) is False
+
+    def test_allows_summary(self):
+        text = "I edited 3 files to resolve the type errors. All tests pass."
+        assert ChatEngine._is_premature_handoff(text) is False
+
+
 # ── TOOL_SCHEMAS validation ──────────────────────────────────────────────
 
 class TestToolSchemas:
@@ -454,7 +512,8 @@ class TestToolSchemas:
         from localforge.chat.tools import TOOL_SCHEMAS
         schema_names = {s["function"]["name"] for s in TOOL_SCHEMAS}
         expected = {
-            "read_file", "write_file", "edit_file", "list_directory",
+            "read_file", "write_file", "edit_file", "edit_lines",
+            "apply_diff", "list_directory",
             "run_command", "search_code", "find_symbols",
             "get_project_overview", "grep_codebase", "verify_changes",
             "batch_edit",

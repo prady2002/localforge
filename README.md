@@ -578,7 +578,7 @@ generate a starter file.
 |-------|------|---------|-------------|
 | `model_name` | `string` | `qwen2.5-coder:7b` | Ollama model tag |
 | `ollama_base_url` | `string` | `http://localhost:11434` | Ollama HTTP API URL |
-| `max_context_tokens` | `int` | `4096` | Max tokens in LLM context window |
+| `max_context_tokens` | `int` | `16384` | Max tokens in LLM context window |
 | `max_iterations` | `int` | `50` | Max agent loop iterations |
 | `repo_path` | `string` | `.` | Repository root path |
 | `index_db_path` | `string` | `.localforge/index.db` | SQLite index location |
@@ -600,7 +600,7 @@ LOCALFORGE_MAX_CONTEXT_TOKENS=8192 localforge autofix "refactor"
 
 | Profile | Context Window | Retrieval Limit | Chunk Size | Reasoning Depth |
 |---------|---------------|-----------------|------------|-----------------|
-| `small` | 4 096 | 5 | 512 | 2 |
+| `small` | 8 192 | 5 | 512 | 2 |
 | `medium` | 8 192 | 10 | 1 024 | 4 |
 | `large` | 32 768 | 20 | 2 048 | 8 |
 

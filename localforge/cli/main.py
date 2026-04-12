@@ -8,8 +8,8 @@ import json
 import os
 import re
 import site
-import sysconfig
 import sys
+import sysconfig
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -888,10 +888,11 @@ def diff(
         current_file = repo / rel
 
         old_content = backup_file.read_text(encoding="utf-8", errors="replace")
-        if current_file.is_file():
-            new_content = current_file.read_text(encoding="utf-8", errors="replace")
-        else:
-            new_content = ""
+        new_content = (
+            current_file.read_text(encoding="utf-8", errors="replace")
+            if current_file.is_file()
+            else ""
+        )
 
         diff_lines = list(
             _difflib.unified_diff(
@@ -1240,8 +1241,14 @@ def models(
 
 @app.command("set-model")
 def set_model(
-    model_name: str | None = typer.Argument(None, help="Model name to set as default (e.g., qwen2.5-coder:14b). If omitted, shows available models for interactive selection."),
-    repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
+    model_name: str | None = typer.Argument(
+        None,
+        help="Model name to set as default (e.g., qwen2.5-coder:14b). "
+        "If omitted, shows available models for interactive selection.",
+    ),
+    repo_path: Path = typer.Option(
+        Path("."), "--repo", "-r", help="Path to the repository root.",
+    ),
 ) -> None:
     """Set your default model or interactively choose from available models."""
     from localforge.core.ollama_client import OllamaClient
@@ -1294,7 +1301,7 @@ def set_model(
                 raise typer.Exit(1)
         except ValueError:
             console.print("[red]Invalid input. Please enter a number.[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
     else:
         # Validate that the provided model exists
         if selected_model not in available_models:

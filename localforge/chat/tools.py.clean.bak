@@ -868,20 +868,10 @@ class ToolExecutor:
         path = self._resolve_path(args.get("path", ""))
         if not path.is_file():
             suggestion = self._suggest_path(args.get("path", ""))
-            req_path = args.get("path", "")
-            # Extract the stem (e.g., "validation" from "src/validation.py")
-            # to help the model search for the right thing
-            stem = Path(req_path).stem if req_path else ""
-            search_hint = ""
-            if stem and stem not in ("__init__",):
-                search_hint = (
-                    f' Try: search_code with pattern "{stem}" to find where '
-                    f"this code actually lives."
-                )
             return (
-                f"Error: File not found: {req_path}{suggestion}\n"
-                f"This file does NOT exist in this project.{search_hint}\n"
-                "Look at the test file imports or pytest error tracebacks for correct paths."
+                f"Error: File not found: {args.get('path')}{suggestion}\n"
+                "Hint: Read the error tracebacks from test output — they show exact file paths. "
+                "Or use search_code or grep_codebase to locate the function/class you're looking for."
             )
 
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -1374,12 +1364,7 @@ class ToolExecutor:
             return None  # Don't block on parse issues for HTML
 
     def _suggest_path(self, rel_path: str) -> str:
-        """Suggest similar file paths when a file is not found.
-
-        Only suggests when the match is very strong (>0.85) to avoid
-        misleading the model.  Weak fuzzy matches like 'hashing.py' →
-        'ranking.py' cause the model to waste rounds reading wrong files.
-        """
+        """Suggest similar file paths when a file is not found."""
         if not rel_path:
             return ""
         target_name = Path(rel_path).name.lower()
@@ -1388,9 +1373,7 @@ class ToolExecutor:
         for dirpath, dirnames, filenames in os.walk(self.repo_path):
             dirnames[:] = [d for d in dirnames if d not in _skip and not d.startswith(".")]
             for fname in filenames:
-                ratio = difflib.SequenceMatcher(None, target_name, fname.lower()).ratio()
-                # Only suggest for very strong matches (exact name, minor typo)
-                if ratio > 0.85:
+                if difflib.SequenceMatcher(None, target_name, fname.lower()).ratio() > 0.6:
                     try:
                         fp = Path(dirpath) / fname
                         candidates.append(str(fp.relative_to(self.repo_path)))
@@ -1753,11 +1736,11 @@ class ToolExecutor:
             output = output[:_MAX_OUTPUT] + "\n... (truncated)"
 
         # Phase 6: Compress large linter/test output to save tokens
-        output = self._compress_tool_output(output, command, self.repo_path)
+        output = self._compress_tool_output(output, command)
         return output
 
     @staticmethod
-    def _compress_pytest_output(output: str, repo_path: Path | None = None, command: str = "") -> str:
+    def _compress_pytest_output(output: str) -> str:
         """Compress pytest output to only failure-relevant information.
 
         Strips passing test lines, keeps only failed test names, short
@@ -1850,89 +1833,13 @@ class ToolExecutor:
             file_summary = "SOURCE FILES IN ERRORS: " + ", ".join(sorted(source_files))
             compressed.insert(0, file_summary)
 
-        # Auto-extract imports from the test file so the model knows the
-        # REAL source file paths instead of guessing (e.g., src/validation.py).
-        # This is the single biggest fix for path hallucination: the model
-        # sees "from localforge.chat.tools import validate_tool_call" and
-        # knows to read localforge/chat/tools.py instead of inventing paths.
-        if repo_path and command:
-            test_file_imports = ToolExecutor._extract_test_file_imports(
-                command, repo_path,
-            )
-            if test_file_imports:
-                compressed.insert(0, test_file_imports)
-
         result = "\n".join(compressed)
         if len(result) < len(output) * 0.85:
             return result
         return output
 
     @staticmethod
-    def _extract_test_file_imports(command: str, repo_path: Path) -> str:
-        """Extract import lines from the test file mentioned in a pytest command.
-
-        Parses 'pytest tests/test_foo.py' to find the test file, reads it,
-        and returns all import/from-import lines.  This tells the model
-        exactly which source files contain the functions under test.
-        """
-        import re as _re_local
-
-        # Extract test file path(s) from the command
-        # Matches: pytest tests/test_foo.py, python -m pytest tests/test_foo.py
-        test_files: list[str] = []
-        for token in command.split():
-            token = token.strip()
-            if token.endswith(".py") and ("test" in token.lower() or "spec" in token.lower()):
-                test_files.append(token)
-
-        if not test_files:
-            return ""
-
-        all_imports: list[str] = []
-        for tf in test_files[:2]:  # Cap at 2 test files to avoid bloat
-            tf_path = repo_path / tf
-            if not tf_path.is_file():
-                # Try with backslash normalization
-                tf_path = repo_path / tf.replace("/", os.sep)
-            if not tf_path.is_file():
-                continue
-            try:
-                content = tf_path.read_text(encoding="utf-8", errors="replace")
-                for line in content.splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("import ") or stripped.startswith("from "):
-                        # Skip stdlib/test framework imports
-                        if any(mod in stripped for mod in (
-                            "import unittest", "import pytest", "import os",
-                            "import sys", "import json", "import re",
-                            "import hashlib", "import tempfile", "import pathlib",
-                            "from unittest", "from pytest", "from pathlib",
-                            "from unittest.mock",
-                        )):
-                            continue
-                        all_imports.append(stripped)
-            except (OSError, UnicodeDecodeError):
-                continue
-
-        if not all_imports:
-            return ""
-
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        unique_imports: list[str] = []
-        for imp in all_imports:
-            if imp not in seen:
-                seen.add(imp)
-                unique_imports.append(imp)
-
-        return (
-            "TEST FILE IMPORTS (these show the REAL source file paths):\n"
-            + "\n".join(unique_imports)
-            + "\nUse these import paths to find the source files to fix."
-        )
-
-    @staticmethod
-    def _compress_tool_output(output: str, command: str, repo_path: Path | None = None) -> str:
+    def _compress_tool_output(output: str, command: str) -> str:
         """Compress large tool outputs by summarizing repetitive errors.
 
         Groups errors by type for linter/compiler outputs across ALL languages,
@@ -1947,7 +1854,7 @@ class ToolExecutor:
         # Compress pytest / test runner output specifically
         is_pytest = any(kw in lower_cmd for kw in ("pytest", "python -m pytest", "py.test"))
         if is_pytest or "test session starts" in output[:500]:
-            return ToolExecutor._compress_pytest_output(output, repo_path, command)
+            return ToolExecutor._compress_pytest_output(output)
 
         # Detect linter/compiler output across all stacks
         is_linter = any(kw in lower_cmd for kw in (

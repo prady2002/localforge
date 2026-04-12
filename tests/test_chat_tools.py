@@ -195,6 +195,37 @@ class TestActionRoutingHeuristics:
         assert ChatEngine._is_fast_action_query("run pytest tests/ -v")
 
 
+class TestTestFixQueryClassification:
+    """Test the test_fix query type for fast test-driven debugging."""
+
+    def test_pytest_failures_with_fix(self):
+        assert ChatEngine._is_test_fix_query("5 tests fail in test_enhancements.py, fix them")
+
+    def test_investigate_test_failures(self):
+        assert ChatEngine._is_test_fix_query(
+            "pytest tests/ shows multiple failures, can you investigate and fix?"
+        )
+
+    def test_run_tests_and_fix(self):
+        assert ChatEngine._is_test_fix_query("run the tests and fix any failing ones")
+
+    def test_jest_test_broken(self):
+        assert ChatEngine._is_test_fix_query("jest tests are broken, please fix")
+
+    def test_not_test_fix_for_simple_run(self):
+        """A simple 'run pytest' without failure/fix intent is NOT test_fix."""
+        assert not ChatEngine._is_test_fix_query("run pytest tests/ -v")
+
+    def test_not_test_fix_for_general_bug(self):
+        """A general bug report without test mention is NOT test_fix."""
+        assert not ChatEngine._is_test_fix_query("the app crashes when I click submit")
+
+    def test_test_error_investigating(self):
+        assert ChatEngine._is_test_fix_query(
+            "test_validation is failing with an assertion error, debug it"
+        )
+
+
 # ── search_code tool ─────────────────────────────────────────────────────
 
 class TestSearchCode:
@@ -425,6 +456,96 @@ class TestIsLazyResponse:
             "You should also run pytest to check for failing tests."
         )
         assert ChatEngine._is_lazy_response(text) is True
+
+
+# ── Pytest output compression ─────────────────────────────────────────────
+
+class TestPytestOutputCompression:
+    """Test the _compress_pytest_output method for reducing test output tokens."""
+
+    def test_strips_passing_tests(self):
+        """Passing test lines should be removed from compressed output."""
+        lines = [
+            "============================= test session starts =============================",
+            "platform win32 -- Python 3.13.7, pytest-9.0.2",
+            "collected 47 items",
+            "",
+        ]
+        # Add 30 PASSED lines
+        for i in range(30):
+            lines.append(f"tests/test_file.py::test_{i} PASSED")
+        lines.extend([
+            "_____________________ test_broken _____________________",
+            "    def test_broken():",
+            ">       assert False",
+            "E       AssertionError",
+            "",
+            "tests/test_file.py:10: AssertionError",
+            "=========================== short test summary info ============================",
+            "FAILED tests/test_file.py::test_broken",
+            "========================= 1 failed, 30 passed =========================",
+        ])
+        output = "\n".join(lines)
+        compressed = ToolExecutor._compress_pytest_output(output)
+        assert "PASSED" not in compressed
+        assert "FAILED" in compressed
+        assert "1 failed" in compressed
+        assert len(compressed) < len(output)
+
+    def test_extracts_source_files_from_tracebacks(self):
+        """Source files mentioned in tracebacks should appear in a summary header."""
+        output = "\n".join([
+            "============================= test session starts =============================",
+            "collected 5 items",
+        ] + [f"tests/test_x.py::test_{i} PASSED" for i in range(20)] + [
+            "_____________________ test_broken _____________________",
+            "localforge/chat/tools.py:123: in validate_tool_call",
+            "    return None",
+            "tests/test_enhancements.py:45: AssertionError",
+            "=========================== short test summary info ============================",
+            "FAILED tests/test_enhancements.py::test_broken",
+            "========================= 1 failed, 20 passed =========================",
+        ])
+        compressed = ToolExecutor._compress_pytest_output(output)
+        assert "SOURCE FILES IN ERRORS:" in compressed
+        assert "localforge/chat/tools.py" in compressed
+
+    def test_small_output_not_compressed(self):
+        """Output with few lines should not be reduced below 85% threshold."""
+        output = "\n".join([
+            "============================= test session starts =============================",
+            "collected 1 item",
+            "tests/test_x.py::test_one PASSED",
+            "========================= 1 passed =========================",
+        ])
+        result = ToolExecutor._compress_pytest_output(output)
+        assert result == output  # No compression for small output
+
+
+class TestAutoOptimizePytestCommand:
+    """Test that pytest commands auto-get --tb=short when missing."""
+
+    def test_detect_bare_pytest(self):
+        """Bare pytest command should need --tb=short appended."""
+        lower = "pytest tests/test_enhancements.py"
+        should_append = ("pytest" in lower or "py.test" in lower) and "--tb" not in lower
+        assert should_append
+
+    def test_no_append_when_tb_present(self):
+        """If --tb is already present, don't append."""
+        lower = "pytest tests/ --tb=long"
+        should_append = ("pytest" in lower or "py.test" in lower) and "--tb" not in lower
+        assert not should_append
+
+
+class TestReadFileHint:
+    """Test that file-not-found errors include actionable hints."""
+
+    def test_file_not_found_includes_hint(self, executor: ToolExecutor):
+        result = executor.execute("read_file", {"path": "nonexistent_file.py"})
+        assert "Error: File not found" in result
+        assert "does NOT exist" in result or "Hint:" in result
+        assert "search_code" in result or "grep_codebase" in result or "test file imports" in result
 
     def test_detects_suggestion_pattern(self):
         text = (

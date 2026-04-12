@@ -68,7 +68,7 @@ def test_parse_python_errors(runner: VerificationRunner) -> None:
         "src/auth.py:10: error: Incompatible return type\n"
         "src/utils.py:25:3: E501 Line too long\n"
     )
-    errors = runner.parse_python_errors(output)
+    errors = runner.parse_errors(output)
     assert len(errors) == 3
     assert errors[0]["tool"] == "pytest"
     assert errors[1]["tool"] == "mypy" and errors[1]["line"] == 10

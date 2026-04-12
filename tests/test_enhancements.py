@@ -24,7 +24,6 @@ from localforge.chat.tools import (
     validate_tool_call,
 )
 
-
 # ── Fixtures ─────────────────────────────────────────────────────────────
 
 @pytest.fixture

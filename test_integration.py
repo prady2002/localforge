@@ -1,7 +1,8 @@
 """Quick integration test: sends a single prompt to ChatEngine and prints the result."""
 import asyncio
-import sys
+import contextlib
 import os
+import sys
 from pathlib import Path
 
 # Point to the test project
@@ -10,9 +11,9 @@ TEST_DIR = Path(os.environ.get("LF_TEST_DIR", r"C:\Users\prgi10298\AppData\Local
 # Ensure localforge is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from localforge.chat.engine import ChatEngine
 from localforge.core.config import LocalForgeConfig, load_config
 from localforge.core.ollama_client import OllamaClient
-from localforge.chat.engine import ChatEngine
 
 
 async def main():
@@ -35,10 +36,8 @@ async def main():
             print(f"Context detection failed: {e}")
 
         # Preload model
-        try:
+        with contextlib.suppress(Exception):
             await ollama.preload_model()
-        except Exception:
-            pass
 
         # Send the test prompt
         prompt = "run ruff check . and fix all the issues it finds"
@@ -49,7 +48,7 @@ async def main():
         response = await engine.send_message(prompt)
 
         print(f"\n{'='*60}")
-        print(f"FINAL RESPONSE:")
+        print("FINAL RESPONSE:")
         print(f"{'='*60}")
         print(response[:2000])
 

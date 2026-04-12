@@ -132,14 +132,20 @@ class ContextRetriever:
     # Main retrieval
     # ------------------------------------------------------------------
 
-    def retrieve(self, task: str, limit: int = 15) -> RetrievalResult:
+    def retrieve(
+        self,
+        task: str,
+        limit: int = 15,
+        focus_paths: list[str] | None = None,
+    ) -> RetrievalResult:
         """Retrieve relevant code chunks for *task*.
 
         Pipeline:
         1. Decompose the task into sub-queries via :meth:`decompose_query`.
         2. For each sub-query, run lexical search and filename search.
         3. Optionally run ``ripgrep`` if available.
-        4. Merge, deduplicate, rank, and return the top *limit* chunks.
+        4. Filter by *focus_paths* when provided.
+        5. Merge, deduplicate, rank, and return the top *limit* chunks.
 
         Parameters
         ----------
@@ -147,6 +153,9 @@ class ContextRetriever:
             Natural-language task description.
         limit:
             Maximum number of chunks to return.
+        focus_paths:
+            When provided, only chunks whose ``file_path`` falls under one
+            of these relative paths are kept.
 
         Returns
         -------
@@ -179,6 +188,13 @@ class ContextRetriever:
                 all_chunks.extend(rg_results)
             except Exception:
                 logger.debug("Ripgrep search failed for sub-query: %s", q, exc_info=True)
+
+        # Filter by focus paths when set
+        if focus_paths:
+            all_chunks = [
+                c for c in all_chunks
+                if _matches_focus_paths(c.file_path, focus_paths)
+            ]
 
         # Boost files explicitly mentioned in the task
         _boost_mentioned_files(all_chunks, task)
@@ -344,3 +360,13 @@ def _boost_mentioned_files(chunks: list[FileChunk], task: str) -> None:
         fname = Path(chunk.file_path).name.lower()
         if fname in task_lower or chunk.file_path.lower() in task_lower:
             chunk.score += 0.3
+
+
+def _matches_focus_paths(file_path: str, focus_paths: list[str]) -> bool:
+    """Return True if *file_path* falls under any of the *focus_paths*."""
+    normalised = file_path.replace("\\", "/").strip("/")
+    for fp in focus_paths:
+        fp_clean = fp.replace("\\", "/").strip("/")
+        if normalised == fp_clean or normalised.startswith(fp_clean.rstrip("/") + "/"):
+            return True
+    return False

@@ -3,6 +3,7 @@
 Creates a project with a deliberate bug, then asks localforge to find and fix it.
 """
 import asyncio
+import contextlib
 import os
 import shutil
 import subprocess
@@ -16,9 +17,9 @@ TEST_DIR = Path(os.environ.get(
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from localforge.chat.engine import ChatEngine
 from localforge.core.config import LocalForgeConfig, load_config
 from localforge.core.ollama_client import OllamaClient
-from localforge.chat.engine import ChatEngine
 
 # ── Buggy project files ──────────────────────────────────
 
@@ -129,14 +130,10 @@ async def main():
     engine = ChatEngine(config, ollama, TEST_DIR)
 
     try:
-        try:
+        with contextlib.suppress(Exception):
             await ollama.detect_context_window()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             await ollama.preload_model()
-        except Exception:
-            pass
 
         prompt = (
             "The tests in test_cart.py are failing. "

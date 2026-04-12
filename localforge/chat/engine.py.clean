@@ -2539,19 +2539,7 @@ class ChatEngine:
                 # calls to guessed paths) when it should investigate one file at
                 # a time, process the result, then decide what to read next.
                 if test_fix and len(tool_calls) > 2:
-                    logger.info(
-                        "test_fix cap: reducing %d tool calls to 2",
-                        len(tool_calls),
-                    )
                     tool_calls = tool_calls[:2]
-                # Extra safety: also cap in non-test_fix mode when model
-                # tries to batch too many reads (often hallucinated paths).
-                elif len(tool_calls) > 5:
-                    logger.info(
-                        "General cap: reducing %d tool calls to 5",
-                        len(tool_calls),
-                    )
-                    tool_calls = tool_calls[:5]
 
                 nudge_count = 0
                 consecutive_no_tool_rounds = 0

@@ -4,6 +4,7 @@ Sends a prompt like 'build me a Flask todo app' to an empty directory
 and verifies localforge creates a working project.
 """
 import asyncio
+import contextlib
 import os
 import shutil
 import sys
@@ -16,9 +17,9 @@ TEST_DIR = Path(os.environ.get(
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from localforge.chat.engine import ChatEngine
 from localforge.core.config import LocalForgeConfig, load_config
 from localforge.core.ollama_client import OllamaClient
-from localforge.chat.engine import ChatEngine
 
 
 async def main():
@@ -41,10 +42,8 @@ async def main():
         except Exception as e:
             print(f"Context detection failed: {e}")
 
-        try:
+        with contextlib.suppress(Exception):
             await ollama.preload_model()
-        except Exception:
-            pass
 
         prompt = (
             "Create a Python CLI calculator app in this directory. "

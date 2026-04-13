@@ -99,7 +99,9 @@ class TestWriteFile:
         assert (tool_repo / "a" / "b" / "c.txt").read_text() == "deep\n"
 
     def test_write_path_traversal(self, executor: ToolExecutor):
-        result = executor.execute("write_file", {"path": "../escape.txt", "content": "bad"})
+        # Parent directory writes are now allowed for project scaffolding
+        # But deeply nested traversal (3+ levels up) is blocked
+        result = executor.execute("write_file", {"path": "../../../escape.txt", "content": "bad"})
         assert "Error" in result
 
 
@@ -637,7 +639,7 @@ class TestToolSchemas:
             "apply_diff", "list_directory",
             "run_command", "search_code", "find_symbols",
             "get_project_overview", "grep_codebase", "verify_changes",
-            "batch_edit",
+            "batch_edit", "create_directory", "create_project",
         }
         assert expected == schema_names
 

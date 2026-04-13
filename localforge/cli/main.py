@@ -1414,3 +1414,86 @@ def run(
         model=model,
         profile=profile,
     )
+
+
+# ---------------------------------------------------------------------------
+# 15. cloud-chat — cloud-powered autonomous chat
+# ---------------------------------------------------------------------------
+
+
+@app.command("cloud-chat")
+def cloud_chat(
+    repo_path: Path = typer.Option(Path("."), "--repo", "-r", help="Path to the repository root."),
+    fresh_auth: bool = typer.Option(
+        False, "--fresh-auth", help="Force re-entering authentication headers."
+    ),
+) -> None:
+    """Start an interactive cloud-powered chat session (Gemini 3.1 Pro).
+
+    Uses the Bell Operation Centre API for fast, powerful, autonomous coding.
+    Auth headers are pasted from your browser at runtime — nothing is hardcoded.
+    """
+    from localforge.cli.display import print_banner
+    from localforge.cloud.auth import CredentialStore, validate_headers
+    from localforge.cloud.client import CloudClient
+    from localforge.cloud.engine import CloudChatEngine
+
+    repo = _resolve_repo(repo_path)
+    config = _load_config(repo)
+
+    # Upgrade context config for cloud model
+    config = config.model_copy(update={"max_context_tokens": 131072})
+
+    # --- Auth ---
+    cred_store = CredentialStore(repo_path=repo)
+
+    auth_data = None
+    if not fresh_auth:
+        auth_data = cred_store.load()
+        if auth_data and cred_store.is_expired(auth_data):
+            console.print(
+                "[yellow]Cached credentials have expired. Please paste fresh headers.[/yellow]"
+            )
+            auth_data = None
+
+    if auth_data is None:
+        try:
+            auth_data = cred_store.prompt_for_headers()
+        except (ValueError, KeyboardInterrupt) as exc:
+            console.print(f"[bold red]Authentication failed:[/bold red] {exc}")
+            raise typer.Exit(1) from None
+
+    ok, msg = validate_headers(auth_data)
+    if not ok:
+        console.print(f"[bold red]Invalid headers:[/bold red] {msg}")
+        raise typer.Exit(1)
+
+    # --- Build client & engine ---
+    client = CloudClient(auth_data)
+
+    # --- Index ---
+    _ensure_index(repo, config)
+
+    # --- Run ---
+    engine = CloudChatEngine(config, client, repo, credential_store=cred_store)
+
+    print_banner(version=__version__, model="gemini-3.1-pro-preview (cloud)")
+
+    async def _run() -> None:
+        # Health check and REPL must share the same event loop so httpx
+        # connections created during the health check remain usable.
+        try:
+            try:
+                healthy = await client.health_check()
+            except Exception as exc:
+                console.print(f"[bold red]Health check failed:[/bold red] {exc}")
+                return
+            if not healthy:
+                console.print("[bold red]Health check returned unhealthy.[/bold red]")
+                return
+
+            await engine.run_repl()
+        finally:
+            await client.close()
+
+    asyncio.run(_run())

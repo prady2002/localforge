@@ -99,9 +99,10 @@ Available tools:
    args: {"path": "relative/path"} (omit path or use "." for repo root)
 
 5. **run_command** — Run a shell command and get the output.
-   args: {"command": "pytest tests/ -q", "timeout": 120}
+   args: {"command": "pytest tests/ -q", "timeout": 120, "cwd": "../my_project"}
    (Destructive commands like rm, del, format are blocked for safety.)
    (timeout is optional, default 120 seconds. Use higher for long builds.)
+   (cwd is optional — set it to run commands in a different directory, e.g., a newly created project.)
 
 6. **search_code** — Search the codebase for a text pattern.
    args: {"pattern": "search string", "file_glob": "*.py"}
@@ -137,6 +138,23 @@ Available tools:
     args: {"path": "file.py", "diff": "--- a/file.py\n+++ b/file.py\n@@ -10,3 +10,4 @@\n..."}
     Use standard unified diff format. Useful for complex multi-hunk changes.
 
+14. **create_directory** — Create a directory (including nested directories).
+    args: {"path": "relative/path/to/dir"}
+    Creates all parent directories automatically. Can create directories outside
+    the repo root for new project scaffolding (e.g., "../my_new_app/src").
+
+15. **create_project** — Create an entire project with multiple files at once.
+    args: {"base_path": "../my_project", "files": {
+      "src/main.py": "content",
+      "src/utils.py": "content",
+      "requirements.txt": "content",
+      "README.md": "content"
+    }}
+    Creates the base_path directory and all files inside it in one call.
+    Can create projects OUTSIDE the current repo (e.g., "../new_app").
+    This is the PREFERRED tool for building new applications from scratch.
+    It handles all directory creation and file writing in a single operation.
+
 ABSOLUTE RULES — YOU MUST FOLLOW THESE:
 - NEVER describe steps for the user to do. YOU do everything yourself using tools.
 - If the user asks you to run mypy, YOU run it with run_command. DO NOT tell the user to run it.
@@ -150,6 +168,10 @@ ABSOLUTE RULES — YOU MUST FOLLOW THESE:
 - You can run ANY command: pytest, mypy, ruff, npm, pip, cargo, make, go, dotnet, mvn, gradle, etc.
 - On Windows, if a tool fails with "not recognized", try `python -m <tool>` or `npx <tool>` instead.
 - Only truly destructive commands (rm, del, format, mkfs) are blocked.
+- When building new projects OUTSIDE the current repo, use create_project to scaffold all files at once.
+- On Windows: use `dir` instead of `ls`, `cd` instead of `pwd`, `type` instead of `cat`. Use `;` or `&` to chain commands, NOT `&&`.
+- On Linux/macOS: standard Unix commands work fine.
+- ALWAYS use create_project for multi-file project creation — it's faster and more reliable than individual write_file calls.
 - Use MULTIPLE tool calls in ONE response for efficiency — do not waste rounds.
 - Prefer batch_edit when making multiple edits across files.
 """
@@ -223,12 +245,13 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "run_command",
             "description": "Run a shell command (pytest, mypy, ruff, npm, pip, make, etc). "
-            "Destructive commands blocked.",
+            "Destructive commands blocked. Use cwd to run in a different directory.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The shell command to run"},
                     "timeout": {"type": "integer", "description": "Timeout in seconds (default 120, max 600)"},
+                    "cwd": {"type": "string", "description": "Working directory (optional, for external projects)"},
                 },
                 "required": ["command"],
             },
@@ -369,6 +392,43 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_directory",
+            "description": "Create a directory (and parents). Supports paths outside repo for new projects.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to directory (relative or ../outside)"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_project",
+            "description": "Create an entire project with multiple files at once. "
+            "Use for scaffolding new applications outside the repo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "base_path": {
+                        "type": "string",
+                        "description": "Base directory for the project (e.g., '../my_app')",
+                    },
+                    "files": {
+                        "type": "object",
+                        "description": "Map of relative file paths to their content",
+                        "additionalProperties": {"type": "string"},
+                    },
+                },
+                "required": ["base_path", "files"],
+            },
+        },
+    },
 ]
 
 # Lean tool set for fast-action prompts (run command, read/edit/write files).
@@ -377,7 +437,8 @@ TOOL_SCHEMAS_FAST = [
     s for s in TOOL_SCHEMAS
     if s["function"]["name"] in {
         "run_command", "read_file", "edit_file", "write_file", "batch_edit",
-        "edit_lines", "apply_diff", "list_directory",
+        "edit_lines", "apply_diff", "list_directory", "create_directory",
+        "create_project",
     }
 ]
 
@@ -697,6 +758,8 @@ _TOOL_REQUIRED_ARGS: dict[str, list[str]] = {
     "grep_codebase": ["pattern"],
     "verify_changes": [],
     "batch_edit": ["edits"],
+    "create_directory": ["path"],
+    "create_project": ["base_path", "files"],
 }
 
 
@@ -798,6 +861,8 @@ class ToolExecutor:
             "grep_codebase": self._grep_codebase,
             "verify_changes": self._verify_changes,
             "batch_edit": self._batch_edit,
+            "create_directory": self._create_directory,
+            "create_project": self._create_project,
         }
 
         handler = dispatch.get(tool_name)
@@ -816,13 +881,32 @@ class ToolExecutor:
     # -- tool implementations ----------------------------------------------
 
     def _resolve_path(self, rel_path: str) -> Path:
-        """Resolve a relative path safely within the repo.
+        """Resolve a relative path safely within or near the repo.
 
+        Allows paths within the repo and in nearby sibling directories
+        (for reading/editing files in externally-created projects).
         If the exact path doesn't exist, tries stripping common prefixes
         (src/, lib/, app/) that models often hallucinate.
         """
         target = (self.repo_path / rel_path).resolve()
-        if not target.is_relative_to(self.repo_path):
+
+        # Allow paths within the repo
+        if target.is_relative_to(self.repo_path):
+            if target.exists():
+                return target
+            # Fall through to prefix stripping / filename search below
+        else:
+            # Allow paths in sibling directories (parent's children) and
+            # grandparent's children — needed for reading/editing files in
+            # externally-created projects (e.g., ../taskmaster_app/main.py)
+            repo_parent = self.repo_path.parent
+            repo_grandparent = repo_parent.parent
+            if target.is_relative_to(repo_parent) or target.is_relative_to(repo_grandparent):
+                if target.exists():
+                    return target
+                # External path that doesn't exist — return directly so caller
+                # gets a clear "File not found" error instead of ValueError
+                return target
             raise ValueError(f"Path traversal blocked: {rel_path!r}")
 
         # If file exists, return it directly
@@ -934,8 +1018,17 @@ class ToolExecutor:
 
     def _write_file(self, args: dict[str, Any]) -> str:
         rel = args.get("path", "")
-        path = self._resolve_path(rel)
         content = args.get("content", "")
+
+        # Try repo-internal path first, then external path for project scaffolding
+        try:
+            path = self._resolve_path(rel)
+        except ValueError:
+            # Path traversal outside repo — try external resolution for scaffolding
+            try:
+                path = self._resolve_external_path(rel)
+            except ValueError as e:
+                return f"Error: {e}"
 
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -1651,6 +1744,19 @@ class ToolExecutor:
 
         command = self._normalize_command(command)
 
+        # Support custom working directory (for running commands in external projects)
+        cwd = args.get("cwd", "").strip()
+        if cwd:
+            try:
+                cwd_path = self._resolve_external_path(cwd)
+                if not cwd_path.is_dir():
+                    return f"Error: cwd directory not found: {cwd}"
+                work_dir = str(cwd_path)
+            except ValueError as e:
+                return f"Error: {e}"
+        else:
+            work_dir = str(self.repo_path)
+
         # Auto-optimize pytest commands: append --tb=short if no --tb flag
         # is already present.  This reduces output size significantly and
         # saves context tokens for the model in subsequent rounds.
@@ -1676,7 +1782,7 @@ class ToolExecutor:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=str(self.repo_path),
+                cwd=work_dir,
                 env=None,  # inherit parent env
             )
         except subprocess.TimeoutExpired:
@@ -1703,7 +1809,7 @@ class ToolExecutor:
                         capture_output=True,
                         text=True,
                         timeout=timeout,
-                        cwd=str(self.repo_path),
+                        cwd=work_dir,
                         env=None,
                     )
                     retry_parts: list[str] = [
@@ -1730,7 +1836,7 @@ class ToolExecutor:
                         capture_output=True,
                         text=True,
                         timeout=timeout,
-                        cwd=str(self.repo_path),
+                        cwd=work_dir,
                         env=None,
                     )
                     retry_parts: list[str] = [
@@ -1754,6 +1860,59 @@ class ToolExecutor:
 
         # Phase 6: Compress large linter/test output to save tokens
         output = self._compress_tool_output(output, command, self.repo_path)
+
+        # Phase 7: Auto-detect common errors and add hints
+        output = self._add_error_hints(output, command, work_dir)
+
+        return output
+
+    @staticmethod
+    def _add_error_hints(output: str, command: str, work_dir: str) -> str:
+        """Append actionable hints for common error patterns."""
+        hints: list[str] = []
+        lower = output.lower()
+
+        # ModuleNotFoundError → suggest pip install
+        if "modulenotfounderror" in lower or "no module named" in lower:
+            # Extract module name
+            import re as _re_local
+            m = _re_local.search(r"no module named ['\"]?(\w+)", lower)
+            if m:
+                mod = m.group(1)
+                hints.append(
+                    f"HINT: Module '{mod}' is not installed. "
+                    f"Run: pip install {mod} (or check requirements.txt for the correct package name)"
+                )
+
+        # npm ERR! → suggest npm install
+        if "npm err!" in lower and "missing" in lower:
+            hints.append("HINT: Dependencies may not be installed. Run: npm install")
+
+        # Permission denied on Windows
+        if "permission denied" in lower or "access is denied" in lower:
+            hints.append("HINT: Permission denied. Try running from a different directory or check file locks.")
+
+        # File not found for executables
+        if ("is not recognized" in lower or "command not found" in lower) and "python" not in lower:
+            hints.append("HINT: Command not found. Check that the tool is installed and in PATH.")
+
+        # ImportError with relative imports → project structure issue
+        if "attempted relative import" in lower:
+            hints.append(
+                "HINT: Relative import error. Make sure __init__.py files exist "
+                "and you're running from the correct directory."
+            )
+
+        # Common pytest collection errors
+        if "collected 0 items" in lower and "error" in lower:
+            hints.append(
+                "HINT: No tests collected. Check that test files start with 'test_' "
+                "and test functions start with 'test_'."
+            )
+
+        if hints:
+            output += "\n\n" + "\n".join(hints)
+
         return output
 
     @staticmethod
@@ -1875,7 +2034,6 @@ class ToolExecutor:
         and returns all import/from-import lines.  This tells the model
         exactly which source files contain the functions under test.
         """
-        import re as _re_local
 
         # Extract test file path(s) from the command
         # Matches: pytest tests/test_foo.py, python -m pytest tests/test_foo.py
@@ -2130,11 +2288,16 @@ class ToolExecutor:
         """Normalize known command pitfalls before execution.
 
         - Normalizes ruff CLI syntax
+        - On Windows: auto-corrects Unix commands to Windows equivalents
         - On Windows, preemptively uses `python -m <tool>` for Python tools
           that aren't in PATH (avoids "not recognized" errors)
         - Falls back to npx for Node.js tools not in PATH
         """
         command = self._normalize_ruff_command(command)
+
+        # Windows-specific command corrections
+        if sys.platform == "win32":
+            command = self._fix_windows_command(command)
 
         import shutil
         parts = command.strip().split()
@@ -2166,6 +2329,75 @@ class ToolExecutor:
             sub = parts[1].lower()
             if sub == "vet" or sub == "test":
                 pass  # already correct form
+
+        return command
+
+    # Unix→Windows command translation table
+    _UNIX_TO_WINDOWS = {
+        "ls": "dir",
+        "ls -la": "dir /a",
+        "ls -l": "dir",
+        "ls -a": "dir /a",
+        "ls -al": "dir /a",
+        "pwd": "cd",
+        "cat": "type",
+        "cp": "copy",
+        "mv": "move",
+        "mkdir -p": "mkdir",
+        "touch": "type nul >",
+        "which": "where",
+        "clear": "cls",
+        "chmod": "echo (chmod not available on Windows, skipping)",
+        "ln -s": "mklink",
+        "head": "more",
+        "tail": "more",
+        "grep": "findstr /I",
+        "wc -l": "find /c /v \"\"",
+    }
+
+    @classmethod
+    def _fix_windows_command(cls, command: str) -> str:
+        """Auto-correct common Unix commands to their Windows equivalents.
+
+        Handles command chaining (&&, ||, ;) and pipe operations.
+        """
+        # Fix command chaining: && works on Windows cmd but not always in subprocess
+        # Replace ; with & for Windows command chaining
+        # But preserve semicolons inside quoted strings
+        parts = command.split()
+        if not parts:
+            return command
+
+        # Direct single-command translations
+        first = parts[0].lower().strip()
+
+        # Full multi-word command match first (e.g., "ls -la")
+        for unix_cmd, win_cmd in cls._UNIX_TO_WINDOWS.items():
+            prefix = unix_cmd.split()
+            if len(parts) >= len(prefix):
+                if [p.lower() for p in parts[:len(prefix)]] == prefix:
+                    rest = parts[len(prefix):]
+                    return f"{win_cmd} {' '.join(rest)}".strip()
+
+        # Single command match
+        if first in cls._UNIX_TO_WINDOWS:
+            rest = parts[1:]
+            win_cmd = cls._UNIX_TO_WINDOWS[first]
+            return f"{win_cmd} {' '.join(rest)}".strip()
+
+        # Fix 'pwd && ls -la' style chained commands
+        if "&&" in command or "||" in command or ";" in command:
+            # Split on chain operators, translate each part, rejoin
+            import re as _re_local
+            chain_parts = _re_local.split(r'(&&|\|\||;)', command)
+            fixed_parts = []
+            for part in chain_parts:
+                stripped = part.strip()
+                if stripped in ("&&", "||", ";"):
+                    fixed_parts.append("&" if stripped == ";" else stripped)
+                else:
+                    fixed_parts.append(cls._fix_windows_command(stripped))
+            return " ".join(fixed_parts)
 
         return command
 
@@ -2700,3 +2932,152 @@ class ToolExecutor:
             results.append(f"  Edit {i} ({path}): {result}")
 
         return "\n".join(results)
+
+    # -- new tools: create_directory, create_project -----------------------
+
+    def _resolve_external_path(self, rel_path: str) -> Path:
+        """Resolve a path that may be outside the repo (e.g., ../new_project).
+
+        Allows creation of files/dirs in sibling directories of the repo,
+        but blocks dangerous traversals (going more than 2 levels up).
+        """
+        target = (self.repo_path / rel_path).resolve()
+
+        # Allow paths within the repo
+        if target.is_relative_to(self.repo_path):
+            return target
+
+        # Allow paths in sibling directories (parent's children)
+        repo_parent = self.repo_path.parent
+        if target.is_relative_to(repo_parent):
+            return target
+
+        # Allow one more level up (grandparent's children) for flexibility
+        repo_grandparent = repo_parent.parent
+        if target.is_relative_to(repo_grandparent):
+            return target
+
+        raise ValueError(
+            f"Path too far outside repo: {rel_path!r}. "
+            "Can only create in repo, parent, or grandparent directories."
+        )
+
+    def _create_directory(self, args: dict[str, Any]) -> str:
+        """Create a directory (and all parent directories)."""
+        rel = args.get("path", "")
+        if not rel:
+            return "Error: path is required"
+
+        try:
+            target = self._resolve_external_path(rel)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            return f"Successfully created directory: {rel}"
+        except OSError as e:
+            return f"Error creating directory: {e}"
+
+    def _create_project(self, args: dict[str, Any]) -> str:
+        """Create an entire project with multiple files at once.
+
+        This is the primary tool for scaffolding new applications.
+        It creates the base directory and all specified files in one call.
+        Returns a detailed summary with project tree and next-step suggestions.
+        """
+        base_path = args.get("base_path", "")
+        files = args.get("files", {})
+
+        if not base_path:
+            return "Error: base_path is required"
+        if not files or not isinstance(files, dict):
+            return "Error: files must be a non-empty dict of {path: content}"
+
+        try:
+            base = self._resolve_external_path(base_path)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        # Create base directory
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return f"Error creating base directory: {e}"
+
+        results: list[str] = []
+        success_count = 0
+        error_count = 0
+        total_bytes = 0
+
+        for file_rel, content in files.items():
+            file_path = base / file_rel
+            try:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                # Ensure content is a string
+                if not isinstance(content, str):
+                    content = str(content)
+                file_path.write_text(content, encoding="utf-8")
+                success_count += 1
+                total_bytes += len(content)
+                results.append(f"  ✓ {file_rel} ({len(content)} bytes)")
+            except OSError as e:
+                error_count += 1
+                results.append(f"  ✗ {file_rel}: {e}")
+
+        # Build a project tree for the model to reference
+        tree_lines = [f"\nPROJECT TREE ({base_path}):"]
+        dirs_seen: set[str] = set()
+        for file_rel in sorted(files.keys()):
+            parts = file_rel.replace("\\", "/").split("/")
+            # Add directory entries
+            for i in range(len(parts) - 1):
+                dir_path = "/".join(parts[:i + 1])
+                if dir_path not in dirs_seen:
+                    dirs_seen.add(dir_path)
+                    indent = "  " * (i + 1)
+                    tree_lines.append(f"{indent}{parts[i]}/")
+            # Add file entry
+            indent = "  " * len(parts)
+            tree_lines.append(f"{indent}{parts[-1]}")
+        tree_str = "\n".join(tree_lines)
+
+        # Detect project type and suggest next steps
+        next_steps: list[str] = ["\nNEXT STEPS:"]
+        file_names = {Path(f).name.lower() for f in files}
+
+        if "requirements.txt" in file_names or "setup.py" in file_names or "pyproject.toml" in file_names:
+            if "requirements.txt" in file_names:
+                next_steps.append(f"  1. cd {base_path} && pip install -r requirements.txt")
+            elif "pyproject.toml" in file_names:
+                next_steps.append(f"  1. cd {base_path} && pip install -e .")
+            has_tests = any("test" in f.lower() for f in files)
+            if has_tests:
+                next_steps.append(f"  2. cd {base_path} && pytest tests/ -v")
+            next_steps.append("  3. Run the application")
+        elif "package.json" in file_names:
+            next_steps.append(f"  1. cd {base_path} && npm install")
+            next_steps.append("  2. npm test")
+            next_steps.append("  3. npm start")
+        elif "go.mod" in file_names:
+            next_steps.append(f"  1. cd {base_path} && go mod tidy")
+            next_steps.append("  2. go test ./...")
+            next_steps.append("  3. go run .")
+        elif "Cargo.toml" in file_names:
+            next_steps.append(f"  1. cd {base_path} && cargo build")
+            next_steps.append("  2. cargo test")
+            next_steps.append("  3. cargo run")
+        elif "pom.xml" in file_names:
+            next_steps.append(f"  1. cd {base_path} && mvn install")
+            next_steps.append("  2. mvn test")
+        else:
+            next_steps.append(f"  1. cd {base_path}")
+            next_steps.append("  2. Install dependencies")
+            next_steps.append("  3. Run tests")
+
+        next_steps_str = "\n".join(next_steps)
+
+        summary = f"Created project at {base_path}: {success_count} files written ({total_bytes:,} bytes total)"
+        if error_count:
+            summary += f", {error_count} errors"
+        return summary + "\n" + "\n".join(results) + tree_str + "\n" + next_steps_str

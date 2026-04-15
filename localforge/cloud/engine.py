@@ -167,8 +167,15 @@ _ANALYSIS_KEYWORDS = {
 
 
 def _classify_query(user_input: str) -> str:
-    """Classify user query into: scaffolding, large_scaffolding, test_fix, debugging, analysis, action."""
+    """Classify user query into: scaffolding, large_scaffolding, test_fix, debugging, analysis, action.
+
+    DESIGN PRINCIPLE: When in doubt, classify as *action*.  An action prompt
+    that turns out to be just a question wastes one tool-loop round at most;
+    an analysis classification for a real action request means the model
+    **cannot** execute tools at all — which is the far worse failure mode.
+    """
     lower = user_input.lower().strip()
+    words = set(lower.split())
 
     # --- Scaffolding detection (before analysis, so "build X" routes correctly) ---
     if _is_scaffolding_query(lower):
@@ -184,7 +191,74 @@ def _classify_query(user_input: str) -> str:
     if _is_debugging_query(lower):
         return "debugging"
 
-    # Question phrases that strongly indicate analysis
+    # ── EARLY-OUT: if ANY action keyword appears ANYWHERE in the query,
+    # this is an action request even if the sentence starts with a question
+    # word. e.g. "what does this file do? write relevant comments to it"
+    # BUT: skip if the query starts with a question phrase like "how to run"
+    # because those ARE pure questions.
+    _STRONG_ACTION_VERBS = {
+        "fix", "edit", "create", "write", "add", "remove", "change", "modify",
+        "refactor", "optimize", "install", "apply", "patch", "generate",
+        "implement", "make", "build", "setup", "configure", "deploy",
+        "scaffold", "migrate", "upgrade", "resolve", "update", "replace",
+        "delete", "rename", "move", "copy", "rewrite", "restructure",
+        "integrate", "autofix", "run", "execute", "test", "do",
+    }
+    _QUESTION_STARTERS = (
+        "how to ", "how do ", "how can ", "how does ", "how should ",
+        "what is ", "what are ", "what does ", "what do ",
+        "why is ", "why does ", "why do ",
+        "where is ", "where are ", "when is ", "when does ",
+    )
+    starts_with_question = any(lower.startswith(q) for q in _QUESTION_STARTERS)
+
+    if not starts_with_question and (words & _STRONG_ACTION_VERBS):
+        return "action"
+
+    # If it starts with a question phrase BUT also contains a SEPARATE
+    # imperative clause (e.g., "what does this do? write comments to it"),
+    # detect the imperative clause and classify as action.
+    if starts_with_question and (words & _STRONG_ACTION_VERBS):
+        # Split on sentence boundaries and check if any non-question sentence is imperative
+        sents = [s.strip() for s in lower.replace("?", "?\n").replace(". ", ".\n").split("\n") if s.strip()]
+        for sent in sents:
+            sent_lower = sent.strip()
+            s_first = sent_lower.split()[0] if sent_lower.split() else ""
+            # If a sentence doesn't start with a question word and starts with an action verb
+            if not any(sent_lower.startswith(q) for q in _QUESTION_STARTERS) and s_first in _STRONG_ACTION_VERBS:
+                return "action"
+            # Check for imperative verbs in non-question sentences
+            s_words = set(sent_lower.split())
+            if not any(sent_lower.startswith(q) for q in _QUESTION_STARTERS):
+                if s_words & {"write", "add", "edit", "create", "fix", "modify", "change", "remove", "delete", "implement", "replace", "rewrite"}:
+                    return "action"
+
+    # Multi-word action phrases that override analysis classification
+    _action_phrases = (
+        "write comments", "add comments", "write docstring", "add docstring",
+        "write documentation", "add documentation", "write tests", "add tests",
+        "put comments", "insert comments", "annotate", "document this",
+        "clean up", "clean this", "tidy up", "refactor this",
+        "look at this and fix", "improve this", "enhance this",
+        "reformat", "re-format", "convert this", "translate this",
+        "sort this", "organize this", "reorganize",
+    )
+    if any(phrase in lower for phrase in _action_phrases):
+        return "action"
+
+    # ── Multi-sentence queries: if the query has multiple sentences and ANY
+    # sentence is imperative, it's an action.
+    sentences = [s.strip() for s in lower.replace("?", "?\n").replace(".", ".\n").split("\n") if s.strip()]
+    if len(sentences) > 1:
+        for sentence in sentences:
+            s_words = set(sentence.split())
+            if s_words & _STRONG_ACTION_VERBS:
+                return "action"
+            first_w = sentence.split()[0] if sentence.split() else ""
+            if first_w in _ACTION_KEYWORDS:
+                return "action"
+
+    # ── Pure question detection (ONLY if no action indicators found above)
     question_phrases = (
         "how to ", "how do ", "how can ", "how does ", "how should ",
         "what is ", "what are ", "what does ", "what do ",
@@ -202,31 +276,19 @@ def _classify_query(user_input: str) -> str:
     )
     for p in question_phrases:
         if lower.startswith(p):
-            # But override for imperative in disguise
-            imperative = ("can you fix", "can you create", "can you write", "can you run",
-                          "could you fix", "could you create", "would you fix")
-            if any(i in lower for i in imperative):
-                return "action"
             return "analysis"
 
     # Question marks with no action verbs → analysis
-    if "?" in lower:
-        words = set(lower.split())
-        if not words & _ACTION_KEYWORDS:
-            return "analysis"
+    if "?" in lower and not (words & _ACTION_KEYWORDS):
+        return "analysis"
 
-    # Explicit action verbs at the start → action
+    # Pure question sentence structure (no action verbs anywhere)
     first_word = lower.split()[0] if lower.split() else ""
-    if first_word in _ACTION_KEYWORDS:
-        return "action"
-
-    # Check if the sentence looks like a question even without ?
     if first_word in ("is", "are", "does", "do", "has", "have", "was", "were",
                       "will", "would", "could", "should", "can", "which", "who"):
-        if not any(a in lower for a in ("fix", "create", "write", "edit", "change", "modify", "add", "remove", "delete")):
-            return "analysis"
+        return "analysis"
 
-    # Default to action for imperative statements
+    # Default to action — this is the SAFE default.
     return "action"
 
 
@@ -624,6 +686,62 @@ class CloudChatEngine:
 
         return "=== FOCUSED FILES ===\n" + "\n\n".join(parts) + "\n=== END FOCUSED FILES ==="
 
+    def _run_preflight_diagnostics(self) -> str:
+        """Run fast syntax checks on focused files before the LLM.
+
+        Returns a diagnostic string to inject into the system prompt.
+        This lets the model skip the "find the error" phase and go
+        straight to fixing — the biggest speed improvement for bugs.
+        """
+        import ast as _ast
+
+        diagnostics: list[str] = []
+
+        # Collect focused files
+        files_to_check: list[Path] = []
+        for fp in self.session.focus_paths:
+            path = self.repo_path / fp
+            if path.is_file():
+                files_to_check.append(path)
+            elif path.is_dir():
+                for child in sorted(path.rglob("*")):
+                    if child.is_file() and child.suffix in (".py", ".json", ".yaml", ".yml"):
+                        files_to_check.append(child)
+                        if len(files_to_check) > 30:
+                            break
+
+        for fpath in files_to_check[:30]:
+            suffix = fpath.suffix.lower()
+            try:
+                rel = fpath.relative_to(self.repo_path).as_posix()
+            except ValueError:
+                continue
+
+            if suffix == ".py":
+                try:
+                    source = fpath.read_text(encoding="utf-8", errors="replace")
+                    _ast.parse(source, filename=rel)
+                except SyntaxError as e:
+                    line_info = f" (line {e.lineno})" if e.lineno else ""
+                    diagnostics.append(f"SYNTAX ERROR in {rel}{line_info}: {e.msg}")
+                except Exception:
+                    pass
+
+            elif suffix == ".json":
+                try:
+                    source = fpath.read_text(encoding="utf-8", errors="replace")
+                    import json as _json
+                    _json.loads(source)
+                except json.JSONDecodeError as e:
+                    diagnostics.append(f"JSON ERROR in {rel} (line {e.lineno}): {e.msg}")
+                except Exception:
+                    pass
+
+        if not diagnostics:
+            return ""
+
+        return "PRE-FLIGHT DIAGNOSTICS — ERRORS FOUND:\n" + "\n".join(diagnostics)
+
     def _recent_messages(self, max_messages: int | None = None) -> list[dict[str, Any]]:
         if max_messages is None:
             max_messages = self._MAX_HISTORY_MESSAGES
@@ -723,13 +841,15 @@ class CloudChatEngine:
         allow_session_reset: bool = True,
         _vpn_retried: bool = False,
     ) -> str:
-        """Direct answer without tool loop — fast for questions."""
+        """Answer with optional read-only tool loop for analysis queries."""
         has_focus = self.session.has_focus()
         repo_map = self._build_repo_map()
         context = self._build_context(user_input, limit=10)
         focus_context = self._build_focus_context() if has_focus else ""
 
         system = CLOUD_ANALYSIS_PROMPT
+        # Include tool descriptions so model can use read-only tools
+        system += "\n\n" + CLOUD_TOOL_PROMPT
         # Inject working directory so the model knows the project context
         repo_abs = str(self.repo_path).replace("\\", "/")
         system += f"\n\nWorking directory: {repo_abs}\nProject: {self.repo_path.name}"
@@ -824,6 +944,59 @@ class CloudChatEngine:
 
         response = "".join(parts)
         self._token_count += len(parts)
+
+        # ── Mini tool loop for read-only tools in analysis mode ──
+        # If the model used read_file/search_code/grep_codebase tool calls,
+        # execute them and feed results back (up to 5 rounds).
+        _READ_ONLY_TOOLS = {"read_file", "search_code", "grep_codebase", "find_symbols",
+                            "list_directory", "get_project_overview"}
+        for _analysis_round in range(5):
+            _, xml_calls = extract_all_tool_calls(response)
+            tool_calls = xml_calls
+            if not tool_calls:
+                _, json_calls = extract_json_tool_calls(response)
+                tool_calls = json_calls
+            # Filter to read-only tools only
+            tool_calls = [tc for tc in tool_calls if tc.get("tool") in _READ_ONLY_TOOLS]
+            if not tool_calls:
+                break
+
+            all_results: list[tuple[str, str]] = []
+            for tc in tool_calls[:10]:
+                tool_name = tc.get("tool", "")
+                tool_args = tc.get("args", {})
+                console.print(f"  [dim]⚡ Tool  {tool_name} {tool_args.get('path', tool_args.get('pattern', ''))}[/dim]")
+                result = self.tools.execute(tool_name, tool_args)
+                preview = result[:80].replace("\n", " ")
+                console.print(f"  [dim]   ✓ ({len(result)} chars) {preview}…[/dim]")
+                all_results.append((tool_name, result))
+
+            # Feed results back
+            working_messages.append({"role": "assistant", "content": response})
+            result_text = "\n\n".join(
+                f"Tool result for {name}:\n```\n{_truncate_tool_result(res)}\n```"
+                for name, res in all_results
+            )
+            working_messages.append({"role": "user", "content": result_text})
+
+            # Stream next response
+            parts = []
+            try:
+                stream = self.client.chat_stream_tokens(
+                    working_messages, system=system, temperature=0.3,
+                )
+                console.print("[bold green]cloud[/bold green] ", end="")
+                async for token in stream:
+                    if token.startswith(THINKING_TOKEN_PREFIX):
+                        continue
+                    parts.append(token)
+                    console.print(token, end="", highlight=False)
+                console.print()
+            except Exception:
+                break
+            response = "".join(parts)
+            self._token_count += len(parts)
+
         self.session.add_assistant_message(response, thinking="".join(thinking_parts))
         self.save_session()
         return response
@@ -907,6 +1080,13 @@ class CloudChatEngine:
                 f"\n\nFOCUS SCOPE: Working with: {focus_list}\n"
                 "File content is provided above. Edit directly."
             )
+
+        # ── Pre-flight diagnostics: catch errors BEFORE the LLM sees them
+        # so it can skip the "find the error" phase and go straight to fixing.
+        if not is_scaffolding and (is_test_fix or is_debugging or has_focus):
+            preflight = self._run_preflight_diagnostics()
+            if preflight:
+                system += f"\n\n{preflight}"
 
         self._append_project_rules(system_parts := [system])
         system = system_parts[0]
@@ -1222,19 +1402,33 @@ class CloudChatEngine:
             final_response = content
 
             # Check if the model is being lazy (giving instructions instead of acting)
-            if consecutive_no_tool == 1 and _round == 0 and not task_verified:
+            # Apply to ALL rounds, not just the first — models can become lazy at any point
+            if not task_verified:
                 lower = content.lower()
                 lazy_phrases = ("you can run", "you should run", "follow these steps",
                                 "here are the steps", "i recommend", "i suggest",
                                 "you'll need to", "you need to", "please run",
-                                "next steps:", "to get started:")
-                is_lazy = sum(1 for p in lazy_phrases if p in lower) >= 2
-                if is_lazy:
+                                "next steps:", "to get started:", "you could",
+                                "try running", "consider using", "you might want",
+                                "here's how", "steps to", "to do this:",
+                                "manual steps", "instructions:", "the following command")
+                is_lazy = sum(1 for p in lazy_phrases if p in lower) >= 1
+
+                # Also detect code-block-only responses with no tool calls
+                # (model pasting code instead of using write_file/edit_file)
+                has_code_blocks = content.count("```") >= 2
+                mentions_file = any(ext in lower for ext in (".py", ".js", ".ts", ".go", ".rs", ".java", ".cpp"))
+                is_code_dump = has_code_blocks and mentions_file and "successfully" not in lower
+
+                if (is_lazy or is_code_dump) and consecutive_no_tool <= 3:
                     working_messages.append({"role": "assistant", "content": content})
-                    working_messages.append({
-                        "role": "user",
-                        "content": "Do NOT give instructions. YOU must execute using tools. Act now.",
-                    })
+                    nudge = (
+                        "STOP giving instructions or code blocks. You ARE the agent. "
+                        "YOU must execute using tools NOW. Use write_file to create files, "
+                        "edit_file to modify files, run_command to execute commands. "
+                        "Do NOT paste code — use tools to write it to disk. ACT NOW."
+                    )
+                    working_messages.append({"role": "user", "content": nudge})
                     continue
 
             # Scaffolding early-exit prevention: if we haven't verified, nudge to continue
@@ -1312,7 +1506,7 @@ class CloudChatEngine:
                 f"Model: [bold cyan]{self.client.model}[/bold cyan] (cloud)  "
                 f"Context: [cyan]128K tokens[/cyan]  "
                 f"Repo: [cyan]{self.repo_path}[/cyan]\n\n"
-                "[dim]Powered by Gemini 3.1 Pro — fast, powerful, autonomous.\n"
+                "[dim]Powered by Alex — fast, powerful, autonomous.\n"
                 "I read/write/edit files, run commands, search code, and verify changes.\n"
                 "Just tell me what to do.\n"
                 "Commands: /add, /remove, /focus, /clear-focus, /clear, /reauth, /help, /quit[/dim]",

@@ -1,3 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localforge"
+dynamic = ["version"]
+description = "A local-first, repo-aware AI coding agent powered by Ollama"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "rich>=13.0",
+    "httpx>=0.25",
+    "typer>=0.9",
+    "pathspec>=0.11",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+localforge = "localforge.cli.main:app"
+
+[tool.setuptools.dynamic]
+version = { attr = "localforge.__version__" }
+
 [tool.ruff]
 select = [
     "E",  # pycodestyle errors

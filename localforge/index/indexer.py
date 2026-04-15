@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +68,14 @@ _SKIP_DIRS: set[str] = {
 
 # Maximum file size we will attempt to index (1 MB).
 _MAX_FILE_SIZE: int = 1_048_576
+
+
+def _read_file_bytes(path: Path) -> tuple[Path, bytes | None]:
+    """Read file bytes — intended for use in a thread pool."""
+    try:
+        return (path, path.read_bytes())
+    except OSError:
+        return (path, None)
 
 # Keywords that indicate the start of a logical block in most languages.
 _BLOCK_KEYWORDS: set[str] = {
@@ -267,8 +277,8 @@ class RepositoryIndexer:
         except OSError:
             return False
 
-        # Binary check.
-        if self._is_binary(path):
+        # Binary check — skip for known text-file extensions.
+        if path.suffix.lower() not in _EXTENSION_LANGUAGE and self._is_binary(path):
             return False
 
         # .gitignore check.
@@ -354,7 +364,7 @@ class RepositoryIndexer:
     # Single-file indexing
     # ------------------------------------------------------------------
 
-    def index_file(self, path: Path) -> bool:
+    def index_file(self, path: Path, *, _content: bytes | None = None, _defer_fts: bool = False, _defer_commit: bool = False) -> bool:
         """Index a single file into the database.
 
         If the file content hash is unchanged since the last index run the
@@ -380,7 +390,7 @@ class RepositoryIndexer:
         rel_posix = rel.as_posix()
 
         try:
-            raw = path.read_bytes()
+            raw = _content if _content is not None else path.read_bytes()
         except OSError as exc:
             logger.warning("Could not read %s: %s", path, exc)
             return False
@@ -442,10 +452,12 @@ class RepositoryIndexer:
         # Extract basic symbols (functions / classes) for supported languages.
         self._extract_symbols(file_id, content, language, conn)
 
-        # Rebuild FTS index for the affected rows.
-        self._rebuild_fts(conn)
+        if not _defer_fts:
+            # Rebuild FTS index for the affected rows.
+            self._rebuild_fts(conn)
 
-        conn.commit()
+        if not _defer_commit:
+            conn.commit()
         return True
 
     # ------------------------------------------------------------------
@@ -461,8 +473,6 @@ class RepositoryIndexer:
         Uses heuristic line scanning — accurate enough for search/navigation.
         Supports Python, JS/TS, Go, Rust, Java, C#, Ruby, PHP, and more.
         """
-        import re
-
         lines = content.splitlines()
 
         def _insert(name: str, kind: str, lineno: int, scope: str = "module") -> None:
@@ -744,6 +754,14 @@ class RepositoryIndexer:
 
         stats["total_files"] = len(eligible)
 
+        conn = self._get_conn()
+        # Optimise SQLite for bulk loading.
+        conn.execute("PRAGMA cache_size = -64000")   # 64 MB page cache
+        conn.execute("PRAGMA temp_store = MEMORY")
+
+        _BATCH = 200
+        n_workers = min(8, (os.cpu_count() or 4))
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -752,17 +770,43 @@ class RepositoryIndexer:
             TimeElapsedColumn(),
         ) as progress:
             task_id = progress.add_task("Indexing files", total=len(eligible))
-            for fpath in eligible:
-                try:
-                    indexed = self.index_file(fpath)
-                    if indexed:
-                        stats["indexed"] += 1
-                    else:
-                        stats["skipped"] += 1
-                except Exception:
-                    logger.exception("Error indexing %s", fpath)
-                    stats["errors"] += 1
-                progress.advance(task_id)
+
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                for batch_start in range(0, len(eligible), _BATCH):
+                    batch = eligible[batch_start : batch_start + _BATCH]
+
+                    # Read file contents concurrently in the thread pool.
+                    file_data = list(pool.map(_read_file_bytes, batch))
+
+                    for fpath, raw in file_data:
+                        if raw is None:
+                            stats["errors"] += 1
+                            progress.advance(task_id)
+                            continue
+                        try:
+                            indexed = self.index_file(
+                                fpath,
+                                _content=raw,
+                                _defer_fts=True,
+                                _defer_commit=True,
+                            )
+                            if indexed:
+                                stats["indexed"] += 1
+                            else:
+                                stats["skipped"] += 1
+                        except Exception:
+                            logger.exception("Error indexing %s", fpath)
+                            stats["errors"] += 1
+                        progress.advance(task_id)
+
+                    # Commit once per batch instead of per file.
+                    conn.commit()
+
+        # Single FTS rebuild at the end — orders of magnitude faster than
+        # rebuilding after every individual file.
+        if stats["indexed"] > 0:
+            self._rebuild_fts(conn)
+            conn.commit()
 
         stats["duration_seconds"] = round(time.time() - start_time, 3)
         logger.info(

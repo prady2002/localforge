@@ -1,4 +1,4 @@
-"""Async HTTP client for the Bell Operation Centre cloud API.
+"""Async HTTP client for the cloud API.
 
 Implements the same public interface as ``OllamaClient`` so the chat engine
 can swap between local and cloud backends transparently.
@@ -37,6 +37,7 @@ _MAX_RETRY_DELAY = 30.0
 
 _RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,
+    httpx.ConnectTimeout,
     httpx.RemoteProtocolError,
     httpx.ReadTimeout,
     httpx.WriteTimeout,
@@ -61,6 +62,23 @@ def _retry_delay(attempt: int) -> float:
     return max(0.5, delay + jitter)
 
 
+def _dns_retry_delay(attempt: int) -> float:
+    """Short retry delay for DNS/getaddrinfo errors.
+
+    DNS blips on Windows corporate VPN typically resolve in <1 s,
+    so we use much shorter delays than the general retry path.
+    """
+    delay = min(0.5 * (2 ** attempt), 5.0)  # 0.5, 1, 2, 4, 5
+    jitter = delay * 0.15 * (2 * random.random() - 1)
+    return max(0.3, delay + jitter)
+
+
+def _is_dns_error(exc: BaseException) -> bool:
+    """Return True if *exc* looks like a transient DNS resolution failure."""
+    detail = str(exc).lower()
+    return "getaddrinfo" in detail or "name or service not known" in detail or "nodename nor servname" in detail
+
+
 # ---------------------------------------------------------------------------
 # Incremental JSON stream parser
 # ---------------------------------------------------------------------------
@@ -69,7 +87,7 @@ def _retry_delay(attempt: int) -> float:
 def _split_concatenated_json(text: str) -> list[str]:
     """Split a string of concatenated JSON objects into individual JSON strings.
 
-    The Bell API returns responses as concatenated JSON: ``{...}{...}{...}``
+    Some cloud APIs return responses as concatenated JSON: ``{...}{...}{...}``
     without any delimiter.  We track brace depth to find object boundaries.
     """
     results: list[str] = []
@@ -122,7 +140,7 @@ def _parse_stream_chunks(raw_text: str) -> list[dict[str, Any]]:
 
 
 class CloudClient:
-    """Async HTTP client for the Bell Operation Centre digital-assistant API.
+    """Async HTTP client for the cloud digital-assistant API.
 
     Drop-in replacement for ``OllamaClient`` — provides the same public
     methods so ``CloudChatEngine`` can use it interchangeably.
@@ -130,7 +148,7 @@ class CloudClient:
 
     def __init__(self, auth_data: dict[str, Any]) -> None:
         self.base_url: str = auth_data["base_url"]
-        self.api_path: str = auth_data.get("api_path", "/api/digital-assistant-backend/messages?regenerate=false")
+        self.api_path: str = auth_data["api_path"]
         self.model = CLOUD_MODEL_NAME
 
         # Build headers from parsed auth data
@@ -203,45 +221,105 @@ class CloudClient:
     async def health_check(self) -> bool:
         """Verify API connectivity and auth validity.
 
+        Retries up to 3 times on transient connection / DNS errors.
         Raises domain-specific exceptions on failure so callers can
         present clear messages to the user.
         """
-        try:
-            # Send a minimal probe request
-            payload = self._build_payload("ping", include_history=False)
-            resp = await self._client.post(
-                self.api_path,
-                json=payload,
-                timeout=httpx.Timeout(connect=15.0, read=30.0, write=15.0, pool=15.0),
-            )
+        _HC_ATTEMPTS = 5
+        last_exc: Exception | None = None
+        dns_failures = 0
 
-            if resp.status_code in (401, 403):
-                raise AuthExpiredError()
-            if resp.status_code == 429:
-                raise RateLimitError()
-            if resp.status_code >= 500:
-                raise APIError(resp.status_code, "Server error during health check.")
-            # Any 2xx is success
-            return 200 <= resp.status_code < 400
+        for attempt in range(_HC_ATTEMPTS):
+            try:
+                # Use empty conversation_id for health check so stale
+                # server-side conversation state cannot cause a false 401.
+                payload = self._build_payload("ping", include_history=False)
+                payload["conversation_id"] = ""
 
-        except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as exc:
-            detail = str(exc)
-            # Distinguish SSL errors from network/DNS errors
-            if "CERTIFICATE_VERIFY_FAILED" in detail or "SSL" in detail:
+                resp = await self._client.post(
+                    self.api_path,
+                    json=payload,
+                    timeout=httpx.Timeout(connect=15.0, read=30.0, write=15.0, pool=15.0),
+                )
+
+                if resp.status_code in (401, 403):
+                    raise AuthExpiredError()
+                if resp.status_code == 429:
+                    raise RateLimitError()
+                if resp.status_code >= 500:
+                    if attempt < _HC_ATTEMPTS - 1:
+                        logger.debug(
+                            "Health check server error %d (attempt %d/%d), retrying…",
+                            resp.status_code, attempt + 1, _HC_ATTEMPTS,
+                        )
+                        with contextlib.suppress(Exception):
+                            await self._client.aclose()
+                        self._client = self._new_httpx_client()
+                        await asyncio.sleep(_dns_retry_delay(attempt))
+                        continue
+                    raise APIError(resp.status_code, "Server error during health check.")
+
+                if dns_failures:
+                    logger.info("Health check succeeded after %d DNS retries.", dns_failures)
+                # Any 2xx is success
+                return 200 <= resp.status_code < 400
+
+            except (AuthExpiredError, RateLimitError, APIError):
+                raise
+            except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as exc:
+                last_exc = exc
+                detail = str(exc)
+                # SSL errors won't be fixed by a retry
+                if "CERTIFICATE_VERIFY_FAILED" in detail or "SSL" in detail:
+                    raise VPNError(
+                        f"SSL certificate verification failed for {self.base_url}.\n"
+                        "  Your corporate network likely uses SSL inspection.\n"
+                        "  Detail: " + detail
+                    ) from exc
+                if attempt < _HC_ATTEMPTS - 1:
+                    if _is_dns_error(exc):
+                        dns_failures += 1
+                        logger.debug(
+                            "Health check DNS error (attempt %d/%d), retrying…",
+                            attempt + 1, _HC_ATTEMPTS,
+                        )
+                    else:
+                        logger.debug(
+                            "Health check connection error (attempt %d/%d): %s",
+                            attempt + 1, _HC_ATTEMPTS, exc,
+                        )
+                    with contextlib.suppress(Exception):
+                        await self._client.aclose()
+                    self._client = self._new_httpx_client()
+                    await asyncio.sleep(_dns_retry_delay(attempt))
+                    continue
                 raise VPNError(
-                    f"SSL certificate verification failed for {self.base_url}.\n"
-                    "  Your corporate network likely uses SSL inspection.\n"
-                    "  Detail: " + detail
+                    f"Cannot reach {self.base_url} after {_HC_ATTEMPTS} attempts. "
+                    "Make sure you are connected to the required VPN or network.\n"
+                    f"  Detail: {detail}"
                 ) from exc
-            raise VPNError(
-                f"Cannot reach {self.base_url}. "
-                "Make sure you are connected to the Bell VPN.\n"
-                f"  Detail: {detail}"
-            ) from exc
-        except (AuthExpiredError, VPNError, RateLimitError, APIError):
-            raise
-        except httpx.HTTPError as exc:
-            raise APIError(0, f"Unexpected HTTP error: {exc}") from exc
+            except VPNError:
+                raise
+            except _RETRYABLE_EXCEPTIONS as exc:
+                last_exc = exc
+                if attempt < _HC_ATTEMPTS - 1:
+                    logger.debug(
+                        "Health check transient error (attempt %d/%d): %s",
+                        attempt + 1, _HC_ATTEMPTS, exc,
+                    )
+                    with contextlib.suppress(Exception):
+                        await self._client.aclose()
+                    self._client = self._new_httpx_client()
+                    await asyncio.sleep(_retry_delay(attempt))
+                    continue
+                raise APIError(0, f"Unexpected HTTP error: {exc}") from exc
+            except httpx.HTTPError as exc:
+                raise APIError(0, f"Unexpected HTTP error: {exc}") from exc
+
+        # Should not reach here
+        raise VPNError(
+            f"Health check failed after {_HC_ATTEMPTS} attempts: {last_exc}"
+        )
 
     async def list_models(self) -> list[str]:
         return [CLOUD_MODEL_NAME]
@@ -308,7 +386,7 @@ class CloudClient:
         system: str | None = None,
         temperature: float = 1.0,
     ) -> dict[str, Any]:
-        """Convert localforge-style messages to Bell API format.
+        """Convert localforge-style messages to cloud API format.
 
         ``messages`` is a list of dicts with ``role`` (user/assistant/system),
         ``content``, and optionally ``thinking`` keys.
@@ -440,6 +518,7 @@ class CloudClient:
         Raises ``AuthExpiredError`` or ``VPNError`` on recognised failures.
         """
         last_exc: Exception | None = None
+        session_reset_attempted = False
 
         for attempt in range(_MAX_RETRIES):
             try:
@@ -448,9 +527,66 @@ class CloudClient:
                     json=payload,
                 )
 
+                resp_text = resp.text or ""
+
+                # Conversation IDs can expire server-side while auth cookies are still
+                # valid. Reset local conversation state and retry once before forcing
+                # the user through re-auth.
+                if resp.status_code in (400, 401, 403):
+                    has_conversation_state = bool(
+                        payload.get("conversation_id")
+                        or self.conversation_id
+                        or self._api_messages
+                    )
+                    looks_like_bad_conversation = False
+                    if resp.status_code == 400:
+                        lower_body = resp_text.lower()
+                        looks_like_bad_conversation = (
+                            "conversation" in lower_body
+                            and any(
+                                marker in lower_body
+                                for marker in (
+                                    "not found",
+                                    "invalid",
+                                    "expired",
+                                    "unknown",
+                                    "does not exist",
+                                )
+                            )
+                        )
+
+                    if (
+                        has_conversation_state
+                        and not session_reset_attempted
+                        and (resp.status_code in (401, 403) or looks_like_bad_conversation)
+                    ):
+                        logger.warning(
+                            "HTTP %d with existing conversation state; resetting conversation and retrying once.",
+                            resp.status_code,
+                        )
+                        self.reset_conversation()
+                        payload["conversation_id"] = ""
+                        session_reset_attempted = True
+
+                        with contextlib.suppress(Exception):
+                            await self._client.aclose()
+                        self._client = self._new_httpx_client()
+                        continue
+
                 if resp.status_code in (401, 403):
                     raise AuthExpiredError()
+                if resp.status_code == 400:
+                    raise APIError(resp.status_code, resp_text[:500] or "Bad request.")
                 if resp.status_code == 429:
+                    # Rate limited — retry with longer backoff
+                    if attempt < _MAX_RETRIES - 1:
+                        retry_after = float(resp.headers.get("Retry-After", _retry_delay(attempt) * 2))
+                        logger.warning(
+                            "Rate limited (attempt %d/%d), waiting %.1fs…",
+                            attempt + 1, _MAX_RETRIES, retry_after,
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
                     raise RateLimitError()
                 if resp.status_code >= 500:
                     # Server errors are retryable
@@ -464,10 +600,10 @@ class CloudClient:
                         self._client = self._new_httpx_client()
                         await asyncio.sleep(_retry_delay(attempt))
                         continue
-                    raise APIError(resp.status_code, resp.text[:500])
+                    raise APIError(resp.status_code, resp_text[:500])
                 resp.raise_for_status()
 
-                return resp.text or ""
+                return resp_text
 
             except (AuthExpiredError, RateLimitError):
                 raise
@@ -486,15 +622,24 @@ class CloudClient:
                     ) from exc
 
                 if attempt < _MAX_RETRIES - 1:
-                    logger.warning(
-                        "Connection error (attempt %d/%d), recreating client: %s",
-                        attempt + 1, _MAX_RETRIES, exc,
-                    )
+                    is_dns = _is_dns_error(exc)
+                    # DNS blips are common on Windows corporate VPN — log
+                    # at debug level and use a fast retry cadence.
+                    if is_dns:
+                        logger.debug(
+                            "DNS error (attempt %d/%d), recreating client",
+                            attempt + 1, _MAX_RETRIES,
+                        )
+                    else:
+                        logger.warning(
+                            "Connection error (attempt %d/%d), recreating client: %s",
+                            attempt + 1, _MAX_RETRIES, exc,
+                        )
                     # Recreate httpx client to get a fresh connection pool
                     with contextlib.suppress(Exception):
                         await self._client.aclose()
                     self._client = self._new_httpx_client()
-                    await asyncio.sleep(_retry_delay(attempt))
+                    await asyncio.sleep(_dns_retry_delay(attempt) if is_dns else _retry_delay(attempt))
                     continue
 
                 raise VPNError(

@@ -240,6 +240,36 @@ class TestSearchCode:
         result = executor.execute("search_code", {"pattern": ""})
         assert "Error" in result
 
+    def test_search_no_matches(self, executor: ToolExecutor):
+        result = executor.execute("search_code", {"pattern": "ZZZZNOTHERE"})
+        assert "no matches" in result.lower()
+
+    def test_search_non_ascii_files(self, tmp_path: Path):
+        """search_code should not crash on files with non-ASCII characters."""
+        # Create file with em-dashes and other non-ASCII
+        (tmp_path / "fancy.py").write_text(
+            '"""Module — powered by café™ résumé."""\nPOWERED = "yes"\n',
+            encoding="utf-8",
+        )
+        executor = ToolExecutor(tmp_path)
+        result = executor.execute("search_code", {"pattern": "POWERED"})
+        assert "POWERED" in result
+        assert "Error" not in result
+
+    def test_search_with_file_glob(self, tool_repo: Path):
+        """search_code should respect file_glob filter."""
+        result = ToolExecutor(tool_repo).execute(
+            "search_code", {"pattern": "hello", "file_glob": "*.py"}
+        )
+        assert "hello" in result
+
+    def test_search_respects_focus(self, tool_repo: Path):
+        """search_code should respect focus paths."""
+        executor = ToolExecutor(tool_repo)
+        executor.focus_paths = ["sub"]
+        result = executor.execute("search_code", {"pattern": "some data"})
+        assert "sub" in result or "data.txt" in result
+
 
 # ── unknown tool ─────────────────────────────────────────────────────────
 

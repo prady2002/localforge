@@ -8,6 +8,7 @@ infrastructure from the local engine.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import logging
@@ -50,10 +51,16 @@ _MAX_TOOL_RESULT_CHARS = 50_000
 
 
 def _truncate_tool_result(text: str, max_chars: int = _MAX_TOOL_RESULT_CHARS) -> str:
+    """Truncate long tool results, keeping head + tail with an omission marker.
+
+    The head gets 60% (most useful context is at the start) and the tail
+    gets 30%, leaving ~10% for the separator/marker text.
+    """
     if len(text) <= max_chars:
         return text
     head = int(max_chars * 0.6)
     tail = int(max_chars * 0.3)
+    assert head + tail < max_chars, f"head({head}) + tail({tail}) >= max_chars({max_chars})"
     omitted = len(text) - head - tail
     return (
         text[:head]
@@ -105,7 +112,8 @@ def _prune_working_messages(messages: list[dict[str, Any]], max_chars: int = 100
     """Prune old messages to keep working context under budget.
 
     Keeps the first message (user's original request) and the most recent
-    messages, dropping older tool result rounds from the middle.
+    messages, dropping older tool result rounds from the middle.  Inserts
+    a summary marker so the model knows context was pruned.
     """
     total = sum(len(m.get("content", "")) for m in messages)
     if total <= max_chars:
@@ -118,10 +126,23 @@ def _prune_working_messages(messages: list[dict[str, Any]], max_chars: int = 100
     # Drop from the middle (older tool result rounds)
     first = messages[:2]
     rest = messages[2:]
+    dropped_count = 0
 
     while total > max_chars and len(rest) > 4:
         dropped = rest.pop(0)
         total -= len(dropped.get("content", ""))
+        dropped_count += 1
+
+    # Insert a marker so the model knows messages were pruned
+    if dropped_count > 0:
+        marker = {
+            "role": "user",
+            "content": (
+                f"[Context pruned: {dropped_count} earlier messages removed to stay within "
+                f"context budget. The original request and most recent messages are preserved.]"
+            ),
+        }
+        return first + [marker] + rest
 
     return first + rest
 
@@ -640,17 +661,46 @@ class CloudChatEngine:
             )
             return False
         console.print(
-            "\n[bold yellow]Session expired — your browser cookies have expired.[/bold yellow]"
+            "\n[bold yellow]Authentication refresh required.[/bold yellow]\n"
+            "[dim]This can happen when cookies expire or when the remote conversation state becomes invalid.[/dim]"
         )
         try:
             parsed = self._credential_store.prompt_for_headers()
             # Rebuild client headers and connection
+            with contextlib.suppress(Exception):
+                await self.client._client.aclose()
             self.client._headers.update(parsed.get("headers", {}))
             self.client._client = self.client._new_httpx_client()
+            self._clear_remote_session_state(reason="reauthenticated")
             return True
         except (ValueError, KeyboardInterrupt):
             console.print("[red]Re-authentication cancelled.[/red]")
             return False
+
+    def _clear_remote_session_state(self, *, reason: str = "") -> None:
+        """Clear persisted cloud conversation state while keeping visible chat history."""
+        self.client.reset_conversation()
+        self.session.conversation_id = ""
+        self.session.api_messages = []
+        self.save_session()
+        if reason:
+            logger.info("Cleared remote cloud conversation state: %s", reason)
+
+    async def _recover_from_auth_error(self, *, allow_session_reset: bool = True) -> bool:
+        """Try session-state recovery before prompting for new auth headers."""
+        has_remote_state = bool(
+            self.client.conversation_id
+            or self.client._api_messages
+            or self.session.conversation_id
+            or self.session.api_messages
+        )
+        if allow_session_reset and has_remote_state:
+            console.print(
+                "\n[yellow]Remote conversation state expired. Resetting session and retrying once…[/yellow]"
+            )
+            self._clear_remote_session_state(reason="auth error recovery")
+            return True
+        return await self._handle_auth_expired()
 
     # ------------------------------------------------------------------
     # Send message
@@ -666,7 +716,13 @@ class CloudChatEngine:
             return await self._handle_analysis_query(user_input)
         return await self._handle_action_query(user_input, query_type=query_type)
 
-    async def _handle_analysis_query(self, user_input: str) -> str:
+    async def _handle_analysis_query(
+        self,
+        user_input: str,
+        *,
+        allow_session_reset: bool = True,
+        _vpn_retried: bool = False,
+    ) -> str:
         """Direct answer without tool loop — fast for questions."""
         has_focus = self.session.has_focus()
         repo_map = self._build_repo_map()
@@ -740,11 +796,24 @@ class CloudChatEngine:
 
             except AuthExpiredError:
                 spinner.stop()
-                if await self._handle_auth_expired():
-                    return await self._handle_analysis_query(user_input)
+                if await self._recover_from_auth_error(allow_session_reset=allow_session_reset):
+                    return await self._handle_analysis_query(user_input, allow_session_reset=False, _vpn_retried=_vpn_retried)
                 return "Session expired. Please re-authenticate."
             except VPNError as exc:
                 spinner.stop()
+                if not _vpn_retried:
+                    console.print(
+                        "\n[yellow]Connection lost — recreating client and retrying…[/yellow]"
+                    )
+                    with contextlib.suppress(Exception):
+                        await self.client._client.aclose()
+                    self.client._client = self.client._new_httpx_client()
+                    await asyncio.sleep(3)
+                    return await self._handle_analysis_query(
+                        user_input,
+                        allow_session_reset=allow_session_reset,
+                        _vpn_retried=True,
+                    )
                 err_msg = str(exc).replace("[", "\\[")
                 console.print(f"\n[bold red]VPN Error:[/bold red] {err_msg}")
                 return str(exc)
@@ -759,7 +828,13 @@ class CloudChatEngine:
         self.save_session()
         return response
 
-    async def _handle_action_query(self, user_input: str, *, query_type: str = "action") -> str:
+    async def _handle_action_query(
+        self,
+        user_input: str,
+        *,
+        query_type: str = "action",
+        allow_session_reset: bool = True,
+    ) -> str:
         """Tool-calling loop for action queries.
 
         *query_type* can be: action, scaffolding, large_scaffolding,
@@ -846,6 +921,8 @@ class CloudChatEngine:
         files_created_count = 0
         has_installed_deps = False
         has_run_tests = False
+        can_reset_session = allow_session_reset
+        vpn_retries_left = 2  # auto-retry VPNError this many times
 
         for _round in range(max_rounds):
             # --- Spinner ---
@@ -909,13 +986,24 @@ class CloudChatEngine:
 
                 except AuthExpiredError:
                     spinner.stop()
-                    if await self._handle_auth_expired():
+                    if await self._recover_from_auth_error(allow_session_reset=can_reset_session):
+                        can_reset_session = False
                         continue  # retry this round
                     self.session.add_assistant_message("Session expired.")
                     self.save_session()
                     return "Session expired."
                 except VPNError as exc:
                     spinner.stop()
+                    if vpn_retries_left > 0:
+                        vpn_retries_left -= 1
+                        console.print(
+                            "\n[yellow]Connection lost — recreating client and retrying…[/yellow]"
+                        )
+                        with contextlib.suppress(Exception):
+                            await self.client._client.aclose()
+                        self.client._client = self.client._new_httpx_client()
+                        await asyncio.sleep(3)
+                        continue  # retry this round
                     err_msg = str(exc).replace("[", "\\[")
                     console.print(f"\n[bold red]VPN Error:[/bold red] {err_msg}")
                     self.session.add_assistant_message(str(exc))
@@ -968,7 +1056,15 @@ class CloudChatEngine:
                     tool_args = tc.get("args", {})
 
                     validation_err = validate_tool_call(tc)
-                    if validation_err:
+                    if validation_err is not None:
+                        # Defensive: validate_tool_call must return None for valid calls
+                        # or a string error message. Log unexpected types.
+                        if not isinstance(validation_err, str):
+                            logger.warning(
+                                "validate_tool_call returned non-string: %r for %s",
+                                validation_err, tool_name,
+                            )
+                            validation_err = str(validation_err)
                         console.print(f"  [dim]⚡ Tool {tool_name} ✗ {validation_err}[/dim]")
                         all_results.append((tool_name, f"Error: {validation_err}"))
                         continue
@@ -983,6 +1079,8 @@ class CloudChatEngine:
                         )
                         if tool_name == "edit_file":
                             redirect += " Use edit_lines with line numbers instead."
+                        elif tool_name == "search_code":
+                            redirect += " Use grep_codebase instead, or try a different search term."
                         console.print(f"  [yellow]⚠ Skipping repeated: {tool_name}[/yellow]")
                         all_results.append((tool_name, f"Error: {redirect}"))
                         continue
@@ -1021,6 +1119,15 @@ class CloudChatEngine:
                     elapsed = time.monotonic() - start_t
 
                     self._tool_calls_count += 1
+
+                    # If search_code found nothing, suggest grep_codebase
+                    if tool_name == "search_code" and result in ("(no matches)", "No matches found"):
+                        pattern = tool_args.get("pattern", "")
+                        result += (
+                            f"\nHint: search_code found no results for '{pattern}'. "
+                            "Try grep_codebase instead — it searches all files reliably. "
+                            "Or try a shorter/different search term."
+                        )
 
                     # Track progress for scaffolding
                     if not result.startswith("Error:"):
@@ -1150,8 +1257,8 @@ class CloudChatEngine:
                     working_messages.append({
                         "role": "user",
                         "content": (
-                            "You haven't created any files yet. Use create_project to scaffold "
-                            "the entire application. Act now with tools."
+                            "You haven't created any files yet. Use write_file to create "
+                            "the project files. Act now with tools."
                         ),
                     })
                     continue
@@ -1237,6 +1344,8 @@ class CloudChatEngine:
 
             await self.send_message(user_input)
 
+        self.save_session()
+
     async def _handle_command(self, cmd: str) -> bool:
         """Handle slash command. Returns False to exit REPL."""
         parts = cmd.split(maxsplit=1)
@@ -1258,8 +1367,11 @@ class CloudChatEngine:
                 self._credential_store.clear()
                 try:
                     parsed = self._credential_store.prompt_for_headers()
+                    with contextlib.suppress(Exception):
+                        await self.client._client.aclose()
                     self.client._headers.update(parsed.get("headers", {}))
                     self.client._client = self.client._new_httpx_client()
+                    self._clear_remote_session_state(reason="manual /reauth")
                     console.print("[green]Re-authenticated successfully.[/green]")
                 except (ValueError, KeyboardInterrupt):
                     console.print("[red]Re-authentication cancelled.[/red]")
@@ -1317,6 +1429,7 @@ class CloudChatEngine:
                     self._sync_focus_to_tools()
                     self._invalidate_repo_map()
                     self._build_repo_map()
+                    self.save_session()
 
         elif command == "/remove":
             if not arg:
@@ -1328,6 +1441,7 @@ class CloudChatEngine:
                     self._sync_focus_to_tools()
                     self._invalidate_repo_map()
                     self._build_repo_map()
+                    self.save_session()
                 else:
                     console.print(f"[yellow]'{arg}' not in focus.[/yellow]")
 
@@ -1343,6 +1457,7 @@ class CloudChatEngine:
             self.session.clear_focus_paths()
             self._sync_focus_to_tools()
             self._invalidate_repo_map()
+            self.save_session()
             console.print("[green]Focus cleared — full codebase mode.[/green]")
 
         elif command == "/tokens":

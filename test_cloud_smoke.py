@@ -33,20 +33,20 @@ print(f"PASS: Conversation ID: {conv_id}")
 # Test 3: Auth header parser
 from localforge.cloud.auth import parse_raw_headers, validate_headers
 
-raw_headers = """POST /api/digital-assistant-backend/messages?regenerate=false HTTP/1.1
+raw_headers = """POST /api/chat/messages?stream=true HTTP/1.1
 Accept: */*
-Cookie: BEPSESSION=abc123test; OCWEBSESSIONID=xyz789
-Host: operationcentre.ms.bell.ca
-Origin: https://operationcentre.ms.bell.ca
-Referer: https://operationcentre.ms.bell.ca/digital-assistant/
+Cookie: session=abc123test; token=xyz789
+Host: api.example.internal
+Origin: https://api.example.internal
+Referer: https://api.example.internal/chat/
 content-type: application/json
 User-Agent: Mozilla/5.0"""
 
 parsed_h = parse_raw_headers(raw_headers)
-assert parsed_h["base_url"] == "https://operationcentre.ms.bell.ca"
-assert "regenerate=false" in parsed_h["api_path"]
+assert parsed_h["base_url"] == "https://api.example.internal"
+assert "/api/chat/messages" in parsed_h["api_path"]
 assert "Cookie" in parsed_h["headers"]
-assert "BEPSESSION" in parsed_h["headers"]["Cookie"]
+assert "session" in parsed_h["headers"]["Cookie"]
 print(f"PASS: Header parser (base_url={parsed_h['base_url']})")
 
 ok, msg = validate_headers(parsed_h)

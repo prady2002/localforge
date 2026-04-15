@@ -1430,7 +1430,7 @@ def cloud_chat(
 ) -> None:
     """Start an interactive cloud-powered chat session (Gemini 3.1 Pro).
 
-    Uses the Bell Operation Centre API for fast, powerful, autonomous coding.
+    Uses a cloud API for fast, powerful, autonomous coding.
     Auth headers are pasted from your browser at runtime — nothing is hardcoded.
     """
     from localforge.cli.display import print_banner
@@ -1482,12 +1482,42 @@ def cloud_chat(
     async def _run() -> None:
         # Health check and REPL must share the same event loop so httpx
         # connections created during the health check remain usable.
+        from localforge.cloud.exceptions import AuthExpiredError, VPNError
+
         try:
-            try:
-                healthy = await client.health_check()
-            except Exception as exc:
-                console.print(f"[bold red]Health check failed:[/bold red] {exc}")
-                return
+            healthy = False
+            for _hc_attempt in range(2):
+                try:
+                    healthy = await client.health_check()
+                    break
+                except AuthExpiredError:
+                    # Cached credentials are stale — prompt for fresh ones
+                    console.print(
+                        "[yellow]Cached credentials expired. Please paste fresh headers.[/yellow]"
+                    )
+                    try:
+                        fresh = cred_store.prompt_for_headers()
+                        client._headers.update(fresh.get("headers", {}))
+                        with contextlib.suppress(Exception):
+                            await client._client.aclose()
+                        client._client = client._new_httpx_client()
+                        client.reset_conversation()
+                        continue  # retry health check
+                    except (ValueError, KeyboardInterrupt):
+                        console.print("[red]Authentication cancelled.[/red]")
+                        return
+                except VPNError:
+                    # Network / DNS issue — warn but let REPL start;
+                    # individual requests have their own retry logic.
+                    console.print(
+                        "[yellow]⚠ DNS/network is unstable — starting anyway (requests will auto-retry).[/yellow]"
+                    )
+                    healthy = True  # allow REPL to proceed
+                    break
+                except Exception as exc:
+                    console.print(f"[bold red]Health check failed:[/bold red] {exc}")
+                    return
+
             if not healthy:
                 console.print("[bold red]Health check returned unhealthy.[/bold red]")
                 return

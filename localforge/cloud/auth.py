@@ -1,8 +1,8 @@
 """Header parsing, credential storage, and interactive auth for the cloud module.
 
 Auth headers are NEVER hardcoded.  The user pastes raw HTTP request headers
-from their browser's DevTools and they are cached locally with restrictive
-permissions (0o600) until they expire.
+from their browser's DevTools (including the request line) and they are cached
+locally with restrictive permissions (0o600) until they expire.
 """
 
 from __future__ import annotations
@@ -44,15 +44,18 @@ def parse_raw_headers(raw_text: str) -> dict[str, Any]:
 
     Expected format (first line is the request line, rest are ``Key: Value``)::
 
-        POST /api/digital-assistant-backend/messages?regenerate=false HTTP/1.1
+        POST /api/some/path?param=value HTTP/1.1
         Accept: */*
-        Cookie: abc=123; def=456
-        Host: operationcentre.ms.bell.ca
+        Cookie: session=abc123; token=xyz
+        Host: your-api-host.example.com
         ...
+
+    The request line (``METHOD /path HTTP/1.x``) is required to extract the
+    API path.  Copy it from the browser Network tab along with the headers.
 
     Returns a dict with:
         ``base_url``   – constructed from Host + scheme (https)
-        ``api_path``   – the request path (e.g. ``/api/digital-assistant-backend/messages``)
+        ``api_path``   – the full request path including query string
         ``headers``    – dict of header-name → value (ready for httpx)
         ``parsed_at``  – Unix timestamp of when parsing happened
     """
@@ -62,8 +65,8 @@ def parse_raw_headers(raw_text: str) -> dict[str, Any]:
 
     # --- First line: request line (optional — user might omit it) --------
     first = lines[0]
-    api_path = "/api/digital-assistant-backend/messages"
-    query_string = "regenerate=false"
+    api_path = ""
+    query_string = ""
     start_idx = 0
 
     if first.upper().startswith(("GET ", "POST ", "PUT ", "PATCH ", "DELETE ", "OPTIONS ")):
@@ -129,23 +132,21 @@ def validate_headers(parsed: dict[str, Any]) -> tuple[bool, str]:
     """Validate that parsed headers contain the minimum required fields."""
     headers = parsed.get("headers", {})
 
+    # Must have a base URL (Host header)
+    if not parsed.get("base_url"):
+        return False, "Missing base URL — check that the Host header is included."
+
+    # Must have an API path (request line)
+    if not parsed.get("api_path"):
+        return False, (
+            "Missing API path — make sure you copy the first line of the request "
+            "(e.g. 'POST /api/... HTTP/1.1') along with the headers."
+        )
+
     # Cookie is essential for auth
     cookie = headers.get("Cookie", "")
     if not cookie:
         return False, "Missing 'Cookie' header — authentication will fail."
-
-    # Must have a base URL
-    if not parsed.get("base_url"):
-        return False, "Missing base URL (Host header)."
-
-    # Check for critical cookie tokens
-    critical_cookies = ["BEPSESSION", "OCWEBSESSIONID"]
-    has_session = any(ck in cookie for ck in critical_cookies)
-    if not has_session:
-        return False, (
-            "Cookie header is missing session tokens (BEPSESSION / OCWEBSESSIONID). "
-            "Make sure you copy ALL request headers from a logged-in browser session."
-        )
 
     return True, "Headers look valid."
 
@@ -269,12 +270,13 @@ class CredentialStore:
         console.print(
             Panel(
                 "[bold yellow]Cloud Authentication Required[/bold yellow]\n\n"
-                "1. Open [cyan]https://operationcentre.ms.bell.ca/digital-assistant/[/cyan] in your browser\n"
+                "1. Open the cloud chat web app in your browser\n"
                 "2. Open DevTools (F12) → Network tab\n"
                 "3. Send any message in the chat\n"
-                "4. Right-click the [bold]messages[/bold] request → Copy → [bold]Copy request headers[/bold]\n"
+                "4. Find the API request, right-click → Copy → [bold]Copy request headers[/bold]\n"
+                "   (include the first request line: POST /api/... HTTP/1.1)\n"
                 "5. Paste below and press [bold]Enter[/bold] twice (empty line) to finish\n\n"
-                "[dim]Your credentials are stored locally and never sent anywhere except the Bell API.[/dim]",
+                "[dim]Your credentials are stored locally and never transmitted outside your machine.[/dim]",
                 border_style="yellow",
                 expand=False,
             )

@@ -25,7 +25,7 @@ class CloudChatMessage(BaseModel):
 class CloudChatSession(BaseModel):
     """Persistent conversation session for the cloud chat engine.
 
-    Stores both the localforge message history and the Bell API's
+    Stores both the localforge message history and the cloud API's
     ``conversation_id`` + raw API message history so conversations
     can resume across restarts.
     """
@@ -37,7 +37,7 @@ class CloudChatSession(BaseModel):
     # Localforge-level messages (for display / slash commands)
     messages: list[CloudChatMessage] = Field(default_factory=list)
 
-    # Bell API conversation state
+    # Cloud API conversation state
     conversation_id: str = ""
     api_messages: list[dict[str, Any]] = Field(default_factory=list)
 
